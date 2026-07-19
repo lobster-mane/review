@@ -1,0 +1,28 @@
+Source: review
+Section: graphics
+Priority: optional
+Maintainer: Review contributors <mika@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ meson (>= 0.61),
+ pkg-config,
+ libgtk-4-dev (>= 4.14),
+ libadwaita-1-dev (>= 1.5),
+ libpoppler-glib-dev (>= 24.02),
+ libcairo2-dev (>= 1.16),
+ libgdk-pixbuf-2.0-dev (>= 2.42),
+ qpdf (>= 11.9)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/mika/review
+
+Package: review
+Architecture: amd64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ qpdf (>= 11.9)
+Description: PDF and image viewer for GNOME
+ Review is a focused viewer and editor for PDF and image files. It supports
+ page organization, annotations, reusable visual signatures, secure cropping,
+ and conversion of PDF pages to 300 DPI color images.

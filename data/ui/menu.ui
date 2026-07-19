@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <menu id="main-menu">
+    <section>
+      <item><attribute name="label">Open…</attribute><attribute name="action">win.open</attribute></item>
+      <item><attribute name="label">Import PDF Pages…</attribute><attribute name="action">win.import-pages</attribute></item>
+      <item><attribute name="label">Save</attribute><attribute name="action">win.save</attribute></item>
+      <item><attribute name="label">Save As…</attribute><attribute name="action">win.save-as</attribute></item>
+      <item><attribute name="label">Export Flattened Copy…</attribute><attribute name="action">win.export-flattened</attribute></item>
+      <item><attribute name="label">Print</attribute><attribute name="action">win.print</attribute></item>
+    </section>
+    <section>
+      <item><attribute name="label">Undo</attribute><attribute name="action">win.undo</attribute></item>
+      <item><attribute name="label">Redo</attribute><attribute name="action">win.redo</attribute></item>
+    </section>
+    <section>
+      <submenu>
+        <attribute name="label">Pages</attribute>
+        <item><attribute name="label">Cut</attribute><attribute name="action">win.cut-pages</attribute></item>
+        <item><attribute name="label">Copy</attribute><attribute name="action">win.copy-pages</attribute></item>
+        <item><attribute name="label">Paste</attribute><attribute name="action">win.paste-pages</attribute></item>
+        <item><attribute name="label">Duplicate</attribute><attribute name="action">win.duplicate-pages</attribute></item>
+        <item><attribute name="label">Delete</attribute><attribute name="action">win.delete-pages</attribute></item>
+        <item><attribute name="label">Rotate Left</attribute><attribute name="action">win.rotate-left</attribute></item>
+        <item><attribute name="label">Rotate Right</attribute><attribute name="action">win.rotate-right</attribute></item>
+        <item><attribute name="label">Convert to Scanned Page</attribute><attribute name="action">win.scan-pages</attribute></item>
+        <item><attribute name="label">Secure Crop</attribute><attribute name="action">win.secure-crop</attribute></item>
+      </submenu>
+      <item><attribute name="label">Fit Width</attribute><attribute name="action">win.fit-width</attribute></item>
+    </section>
+    <section>
+      <item><attribute name="label">Draw Signature…</attribute><attribute name="action">win.draw-signature</attribute></item>
+      <item><attribute name="label">Import Signature…</attribute><attribute name="action">win.import-signature</attribute></item>
+    </section>
+    <section>
+      <item><attribute name="label">New Window</attribute><attribute name="action">app.new-window</attribute></item>
+      <item><attribute name="label">About Review</attribute><attribute name="action">app.about</attribute></item>
+      <item><attribute name="label">Quit</attribute><attribute name="action">app.quit</attribute></item>
+    </section>
+  </menu>
+</interface>

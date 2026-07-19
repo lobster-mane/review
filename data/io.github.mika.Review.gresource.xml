@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/mika/Review">
+    <file>style.css</file>
+    <file>ui/menu.ui</file>
+    <file>icons/scalable/actions/review-highlight-symbolic.svg</file>
+    <file>icons/scalable/actions/review-text-symbolic.svg</file>
+    <file>icons/scalable/actions/review-ink-symbolic.svg</file>
+    <file>icons/scalable/actions/review-rectangle-symbolic.svg</file>
+    <file>icons/scalable/actions/review-ellipse-symbolic.svg</file>
+    <file>icons/scalable/actions/review-arrow-symbolic.svg</file>
+    <file>icons/scalable/actions/review-signature-symbolic.svg</file>
+    <file>icons/scalable/actions/review-crop-symbolic.svg</file>
+    <file>icons/scalable/actions/review-scan-symbolic.svg</file>
+    <file>icons/scalable/actions/review-hand-symbolic.svg</file>
+    <file>icons/scalable/actions/review-select-symbolic.svg</file>
+  </gresource>
+</gresources>

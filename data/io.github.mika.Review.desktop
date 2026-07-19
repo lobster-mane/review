@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Review
+Comment=View, organize, and annotate PDFs and images
+Exec=/usr/bin/review %U
+Icon=io.github.mika.Review
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;
+MimeType=application/pdf;image/png;image/jpeg;image/webp;image/tiff;image/bmp;image/gif;
+StartupNotify=true
+Keywords=PDF;Image;Viewer;Annotate;Signature;Scan;

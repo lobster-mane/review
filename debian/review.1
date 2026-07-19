@@ -1,0 +1,28 @@
+.TH REVIEW 1 "July 2026" "Review 0.1.0" "User Commands"
+.SH NAME
+review \- view and edit PDF and image files
+.SH SYNOPSIS
+.B review
+.RI [ FILE ...]
+.SH DESCRIPTION
+.B Review
+is a native GNOME viewer and editor for PDF and raster image files.  It
+supports page organization, PDF annotations, reusable visual signatures,
+secure destructive cropping, and conversion of PDF pages to 300 DPI
+full-color image-only pages.
+.PP
+Each file is opened in its own application window.  With no file argument,
+Review opens a file chooser.
+.SH OPTIONS
+Standard GTK and GApplication options are accepted.  Use
+.B review --help
+to display the options supported by the installed build.
+.SH FILES
+.TP
+.I $XDG_DATA_HOME/review/signatures
+Saved visual signatures.  The directory and its files are private to the
+current user.  These are appearance stamps, not cryptographic signatures.
+.SH SEE ALSO
+.BR qpdf (1)
+.SH COPYRIGHT
+Copyright 2026 Review contributors.  License GPL-3.0-or-later.

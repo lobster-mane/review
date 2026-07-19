@@ -1,0 +1,22 @@
+.page-canvas {
+  background: #2e2e2e;
+}
+
+.navigation-sidebar row {
+  padding: 10px;
+}
+
+.navigation-sidebar picture {
+  background: white;
+  box-shadow: 0 2px 8px alpha(black, .35);
+}
+
+.toolbar {
+  border-bottom: 1px solid alpha(currentColor, .12);
+}
+
+.signature-pad {
+  background: white;
+  border: 1px solid alpha(black, .18);
+  border-radius: 6px;
+}

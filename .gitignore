@@ -1,0 +1,6 @@
+/build/
+/build-manual/
+*.deb
+*.build
+*.buildinfo
+*.changes
