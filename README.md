@@ -38,12 +38,13 @@ Review is free and open-source software, licensed under
 
 ## Install Review
 
-### Recommended: install from Mika's software repository
+### Add the repo
 
-This is the easiest option for most people. First follow the one-time
-instructions on:
+First follow the one-time instructions on:
 
 **[mikakalevi.com/repo](https://mikakalevi.com/repo)**
+
+### Install
 
 Once the repository has been added to your computer, install Review with:
 
@@ -58,17 +59,6 @@ manager.
 Installing from the repository also means future versions can arrive through
 your normal system updates.
 
-### Install a downloaded `.deb`
-
-If you already have a Review `.deb` package, open a terminal in the folder
-containing it and run:
-
-```sh
-sudo apt install ./review_0.1.0_amd64.deb
-```
-
-Using `apt` this way lets Ubuntu install any required supporting packages at
-the same time.
 
 ### System requirements
 
