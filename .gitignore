@@ -2,5 +2,7 @@
 /build-manual/
 *.deb
 *.build
+!meson.build
 *.buildinfo
 *.changes
+/result
