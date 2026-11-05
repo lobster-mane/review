@@ -173,6 +173,26 @@ void page_operations() {
   g_unlink(path.c_str());
 }
 
+void text_wraps_to_bounds() {
+  const auto path = fixture_pdf();
+  const auto output = path + ".wrap.pdf";
+  review::Document doc;
+  std::string error;
+  g_assert_true(doc.open(path, error));
+  review::Annotation text;
+  text.type = review::AnnotationType::TextBox;
+  text.bounds = {20, 20, 80, 20};
+  text.text = "A long line of text that must wrap inside a narrow text box.";
+  text.font_size = 14;
+  doc.add_annotation(0, text);
+  const auto& saved = doc.page(0).annotations.back();
+  g_assert_cmpfloat(saved.bounds.width, ==, 80);
+  g_assert_cmpfloat(saved.bounds.height, >, 20);
+  g_assert_true(doc.save(output, error));
+  g_unlink(path.c_str());
+  g_unlink(output.c_str());
+}
+
 void save_annotations() {
   const auto path = fixture_pdf();
   const auto output = path + ".saved.pdf";
@@ -191,7 +211,7 @@ void save_annotations() {
   text.align = review::TextAlign::Center;
   doc.add_annotation(0, text);
   const auto saved_text = doc.page(0).annotations.back();
-  g_assert_cmpfloat(saved_text.bounds.width, >, text.bounds.width);
+  g_assert_cmpfloat(saved_text.bounds.width, ==, text.bounds.width);
   g_assert_cmpfloat(saved_text.bounds.height, >, text.bounds.height);
 
   review::Annotation square;
@@ -328,6 +348,7 @@ int main(int argc, char** argv) {
   g_test_add_func("/document/annotation-edit-properties", annotation_edit_properties);
   g_test_add_func("/document/secure-crop", crop_is_destructive);
   g_test_add_func("/document/page-operations", page_operations);
+  g_test_add_func("/document/text-wrap", text_wraps_to_bounds);
   g_test_add_func("/document/save-annotations", save_annotations);
   g_test_add_func("/document/rasterize-color", rasterized_page_has_no_text);
   return g_test_run();

@@ -3,6 +3,7 @@
 #include <cairo-pdf.h>
 #include <gio/gio.h>
 #include <glib/gstdio.h>
+#include <pango/pangocairo.h>
 
 #include <algorithm>
 #include <cmath>
@@ -61,39 +62,52 @@ bool run_process(const std::vector<std::string>& args, std::string& error) {
   return true;
 }
 
-void select_annotation_font(cairo_t* cr, const Annotation& annotation) {
-  cairo_select_font_face(
-      cr, annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str(),
-      annotation.italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL,
-      annotation.bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+PangoLayout* create_text_layout(cairo_t* cr, const Annotation& annotation, double width) {
+  PangoLayout* layout = pango_cairo_create_layout(cr);
+  PangoFontDescription* font = pango_font_description_new();
+  pango_font_description_set_family(
+      font, annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str());
+  pango_font_description_set_size(
+      font, std::max(1, static_cast<int>(annotation.font_size * PANGO_SCALE)));
+  pango_font_description_set_weight(
+      font, annotation.bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+  pango_font_description_set_style(
+      font, annotation.italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
+  pango_layout_set_font_description(layout, font);
+  pango_font_description_free(font);
+
+  const int inner_width = std::max(1, static_cast<int>((width - 8.0) * PANGO_SCALE));
+  pango_layout_set_width(layout, inner_width);
+  pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+  pango_layout_set_alignment(
+      layout, annotation.align == TextAlign::Center ? PANGO_ALIGN_CENTER :
+              annotation.align == TextAlign::Right ? PANGO_ALIGN_RIGHT : PANGO_ALIGN_LEFT);
+  pango_layout_set_text(layout, annotation.text.c_str(), -1);
+  if (annotation.underline) {
+    PangoAttrList* attributes = pango_attr_list_new();
+    pango_attr_list_insert(attributes, pango_attr_underline_new(PANGO_UNDERLINE_SINGLE));
+    pango_layout_set_attributes(layout, attributes);
+    pango_attr_list_unref(attributes);
+  }
+  return layout;
 }
 
 Rect fit_text_bounds(const Annotation& annotation) {
   Rect fitted = annotation.bounds;
   auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
   auto* cr = cairo_create(surface);
-  select_annotation_font(cr, annotation);
-  cairo_set_font_size(cr, annotation.font_size);
-  cairo_font_extents_t font{};
-  cairo_font_extents(cr, &font);
-
-  double widest = 0.0;
-  std::size_t lines = 0;
-  std::istringstream input(annotation.text.empty() ? " " : annotation.text);
-  std::string line;
-  while (std::getline(input, line)) {
-    cairo_text_extents_t text{};
-    cairo_text_extents(cr, line.c_str(), &text);
-    widest = std::max(widest, std::max(text.x_advance, text.x_bearing + text.width));
-    ++lines;
-  }
-  if (lines == 0) lines = 1;
-  fitted.width = std::max(fitted.width, std::ceil(widest + 8.0));
-  fitted.height = std::max(
-      fitted.height, std::ceil(font.ascent + font.descent +
-                               (lines - 1) * std::max(font.height, annotation.font_size) + 8.0));
+  PangoLayout* layout = create_text_layout(
+      cr, annotation, std::max(24.0, fitted.width));
+  int width = 0;
+  int height = 0;
+  pango_layout_get_size(layout, &width, &height);
+  g_object_unref(layout);
   cairo_destroy(cr);
   cairo_surface_destroy(surface);
+
+  fitted.width = std::max(fitted.width, 24.0);
+  fitted.height = std::max(
+      fitted.height, std::ceil(height / static_cast<double>(PANGO_SCALE) + 8.0));
   return fitted;
 }
 
@@ -572,39 +586,16 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale) c
           cairo_stroke(cr);
         }
         break;
-      case AnnotationType::TextBox:
-        select_annotation_font(cr, a);
-        cairo_set_font_size(cr, a.font_size);
-        {
-          cairo_font_extents_t font{};
-          cairo_font_extents(cr, &font);
-          std::istringstream input(a.text);
-          std::string line;
-          std::size_t line_number = 0;
-          while (std::getline(input, line)) {
-            cairo_text_extents_t extents{};
-            cairo_text_extents(cr, line.c_str(), &extents);
-            double x = b.x + 4.0;
-            if (a.align == TextAlign::Center)
-              x = b.x + (b.width - extents.x_advance) / 2.0;
-            else if (a.align == TextAlign::Right)
-              x = b.x + b.width - 4.0 - extents.x_advance;
-            const double baseline = b.y + 4.0 + font.ascent +
-                line_number * std::max(font.height, a.font_size);
-            cairo_move_to(cr, x, baseline);
-            cairo_show_text(cr, line.c_str());
-            if (a.underline) {
-              cairo_set_line_width(cr, std::max(1.0, a.font_size / 14.0));
-              cairo_move_to(cr, x, baseline + std::max(1.0, font.descent * 0.35));
-              cairo_line_to(cr, x + extents.x_advance,
-                            baseline + std::max(1.0, font.descent * 0.35));
-              cairo_stroke(cr);
-              cairo_set_line_width(cr, a.stroke_width);
-            }
-            ++line_number;
-          }
-        }
+      case AnnotationType::TextBox: {
+        PangoLayout* layout = create_text_layout(cr, a, b.width);
+        cairo_save(cr);
+        cairo_translate(cr, b.x + 4.0, b.y + 4.0);
+        cairo_set_source_rgba(cr, a.stroke.red, a.stroke.green, a.stroke.blue, a.stroke.alpha);
+        pango_cairo_show_layout(cr, layout);
+        cairo_restore(cr);
+        g_object_unref(layout);
         break;
+      }
       case AnnotationType::Signature: {
         GError* error = nullptr;
         GdkPixbuf* signature = gdk_pixbuf_new_from_file(a.signature_path.c_str(), &error);
