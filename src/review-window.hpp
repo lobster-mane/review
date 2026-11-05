@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace review {
@@ -60,11 +61,18 @@ private:
   void select_annotation_at(Point point);
   void sync_annotation_controls();
   void apply_annotation_controls(bool text_and_font);
-  void edit_text_annotation();
-  void start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_new = false);
+  void edit_text_annotation(std::optional<Point> click = std::nullopt);
+  void start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_new = false,
+                              std::optional<Point> click = std::nullopt);
   void finish_inline_text_edit(bool commit);
   void position_inline_editor();
   void apply_inline_text_style();
+  void apply_inline_text_spans();
+  void apply_inline_annotation_controls(bool text_and_font);
+  void sync_inline_format_controls();
+  [[nodiscard]] TextStyle inline_style_at_offset(int offset) const;
+  [[nodiscard]] std::vector<TextSpan> inline_text_spans() const;
+  GtkTextTag* create_inline_format_tag(const TextStyle& style);
   Point canvas_to_page(double x, double y) const;
   void finish_canvas_drag(double x, double y);
 
@@ -83,6 +91,7 @@ private:
   GtkWidget* inline_editor_{};
   GtkTextView* inline_text_view_{};
   GtkTextTag* inline_text_tag_{};
+  std::vector<std::pair<GtkTextTag*, TextStyle>> inline_format_tags_{};
   GtkSearchEntry* search_{};
   GtkToggleButton* active_tool_button_{};
   GtkToggleButton* select_button_{};
@@ -102,6 +111,9 @@ private:
   std::size_t current_page_{};
   double zoom_{1.0};
   bool fit_width_{true};
+  bool fit_width_dirty_{true};
+  int last_fit_available_{};
+  double last_fit_reference_{};
   bool continuous_scroll_{false};
   bool syncing_sidebar_{false};
   int sidebar_position_{180};
@@ -126,6 +138,9 @@ private:
   bool updating_annotation_controls_{};
   Annotation annotation_edit_origin_{};
   Point drag_start_{};
+  Point drag_current_{};
+  bool drag_active_{};
+  bool drag_is_text_{};
   double pan_horizontal_start_{};
   double pan_vertical_start_{};
   gint64 last_edge_page_change_{};
@@ -139,6 +154,7 @@ private:
   bool inline_edit_active_{};
   bool inline_edit_is_new_{};
   bool finishing_inline_edit_{};
+  gint64 inline_edit_started_at_{};
   std::vector<Point> ink_points_{};
   std::vector<Point> signature_points_{};
 };

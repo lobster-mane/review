@@ -123,6 +123,12 @@ void annotation_edit_properties() {
   edited.italic = true;
   edited.underline = true;
   edited.align = review::TextAlign::Center;
+  review::TextStyle span_style;
+  span_style.bold = true;
+  span_style.color = {0.2, 0.4, 0.6, 1.0};
+  span_style.font_family = "Serif";
+  span_style.font_size = 18;
+  edited.text_spans = {{0, 4, span_style}};
   g_assert_true(doc.update_annotation(0, id, edited));
   g_assert_cmpstr(doc.page(0).annotations.front().text.c_str(), ==, "Edited");
   g_assert_cmpstr(doc.page(0).annotations.front().font_family.c_str(), ==, "Serif");
@@ -130,6 +136,9 @@ void annotation_edit_properties() {
   g_assert_true(doc.page(0).annotations.front().italic);
   g_assert_true(doc.page(0).annotations.front().underline);
   g_assert_true(doc.page(0).annotations.front().align == review::TextAlign::Center);
+  g_assert_cmpuint(doc.page(0).annotations.front().text_spans.size(), ==, 1);
+  g_assert_cmpuint(doc.page(0).annotations.front().text_spans.front().end, ==, 4);
+  g_assert_true(doc.page(0).annotations.front().text_spans.front().style.bold);
   g_assert_true(doc.undo());
   g_assert_cmpstr(doc.page(0).annotations.front().text.c_str(), ==, "Original");
 
@@ -209,6 +218,13 @@ void save_annotations() {
   text.bold = true;
   text.underline = true;
   text.align = review::TextAlign::Center;
+  review::TextStyle span;
+  span.bold = true;
+  span.italic = true;
+  span.color = {0.8, 0.1, 0.1, 1.0};
+  span.font_family = "Serif";
+  span.font_size = 24;
+  text.text_spans = {{0, 8, span}};
   doc.add_annotation(0, text);
   const auto saved_text = doc.page(0).annotations.back();
   g_assert_cmpfloat(saved_text.bounds.width, ==, text.bounds.width);

@@ -75,12 +75,12 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   `qpdf --check`, and atomic-rename flow in `Document::save`.
 - Canvas coordinates are top-left based; PDF annotation coordinates are
   bottom-left. Conversion happens in `write_pdf_annotations`.
-- Text formatting lives on `Annotation` (`bold`, `italic`, `underline`,
-  `align`). Text is laid out with Pango and wraps to the annotation width;
+- Text formatting lives on `Annotation`; per-word overrides are stored in
+  `text_spans`. `review-text.hpp` is the shared Pango layout/wrap code, and
   `render_page` accepts a skip-annotation id so the inline editor can hide the
-  document copy and draw itself in place. Keep `fit_text_bounds`,
-  `draw_annotations`, and the FreeText `/DA` export in
-  `convert_saved_free_text` in sync when changing it.
+  document copy and draw itself in place. The editor uses GtkTextTags and
+  extracts spans on commit. Keep `fit_text_bounds`, `draw_annotations`, the
+  editor tag logic, and the FreeText `/DA` export in sync when changing it.
 - `Document` holds page references into source files; page edits are
   serialized at save time, and rasterized/secure-cropped pages are rebuilt
   from renders. Secure crop and rasterize are destructive.

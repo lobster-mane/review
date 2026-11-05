@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,6 +45,21 @@ enum class TextAlign {
   Right,
 };
 
+struct TextStyle {
+  bool bold{};
+  bool italic{};
+  bool underline{};
+  Color color{};
+  std::string font_family{"Sans"};
+  double font_size{12.0};
+};
+
+struct TextSpan {
+  std::size_t start{};
+  std::size_t end{};
+  TextStyle style{};
+};
+
 struct Annotation {
   std::uint64_t id{};
   AnnotationType type{AnnotationType::Rectangle};
@@ -60,6 +76,7 @@ struct Annotation {
   bool italic{};
   bool underline{};
   TextAlign align{TextAlign::Left};
+  std::vector<TextSpan> text_spans{};
 };
 
 struct Crop {

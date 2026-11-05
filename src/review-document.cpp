@@ -1,9 +1,9 @@
 #include "review-document.hpp"
+#include "review-text.hpp"
 
 #include <cairo-pdf.h>
 #include <gio/gio.h>
 #include <glib/gstdio.h>
-#include <pango/pangocairo.h>
 
 #include <algorithm>
 #include <cmath>
@@ -62,52 +62,11 @@ bool run_process(const std::vector<std::string>& args, std::string& error) {
   return true;
 }
 
-PangoLayout* create_text_layout(cairo_t* cr, const Annotation& annotation, double width) {
-  PangoLayout* layout = pango_cairo_create_layout(cr);
-  PangoFontDescription* font = pango_font_description_new();
-  pango_font_description_set_family(
-      font, annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str());
-  pango_font_description_set_size(
-      font, std::max(1, static_cast<int>(annotation.font_size * PANGO_SCALE)));
-  pango_font_description_set_weight(
-      font, annotation.bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
-  pango_font_description_set_style(
-      font, annotation.italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
-  pango_layout_set_font_description(layout, font);
-  pango_font_description_free(font);
-
-  const int inner_width = std::max(1, static_cast<int>((width - 8.0) * PANGO_SCALE));
-  pango_layout_set_width(layout, inner_width);
-  pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
-  pango_layout_set_alignment(
-      layout, annotation.align == TextAlign::Center ? PANGO_ALIGN_CENTER :
-              annotation.align == TextAlign::Right ? PANGO_ALIGN_RIGHT : PANGO_ALIGN_LEFT);
-  pango_layout_set_text(layout, annotation.text.c_str(), -1);
-  if (annotation.underline) {
-    PangoAttrList* attributes = pango_attr_list_new();
-    pango_attr_list_insert(attributes, pango_attr_underline_new(PANGO_UNDERLINE_SINGLE));
-    pango_layout_set_attributes(layout, attributes);
-    pango_attr_list_unref(attributes);
-  }
-  return layout;
-}
-
 Rect fit_text_bounds(const Annotation& annotation) {
   Rect fitted = annotation.bounds;
-  auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-  auto* cr = cairo_create(surface);
-  PangoLayout* layout = create_text_layout(
-      cr, annotation, std::max(24.0, fitted.width));
-  int width = 0;
-  int height = 0;
-  pango_layout_get_size(layout, &width, &height);
-  g_object_unref(layout);
-  cairo_destroy(cr);
-  cairo_surface_destroy(surface);
-
   fitted.width = std::max(fitted.width, 24.0);
   fitted.height = std::max(
-      fitted.height, std::ceil(height / static_cast<double>(PANGO_SCALE) + 8.0));
+      fitted.height, std::ceil(measure_text_height(annotation, fitted.width) + 8.0));
   return fitted;
 }
 
