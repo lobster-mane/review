@@ -42,6 +42,7 @@ public:
   std::string page_text(std::size_t index) const;
   [[nodiscard]] std::vector<Rect> highlight_rects(std::size_t index, Point start,
                                                  Point end) const;
+  bool erase_highlights(std::size_t page_index, const std::vector<Rect>& areas);
 
   void checkpoint();
   bool undo();

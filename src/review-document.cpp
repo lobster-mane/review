@@ -707,6 +707,108 @@ std::vector<Rect> Document::highlight_rects(std::size_t index, Point start,
   return result;
 }
 
+bool Document::erase_highlights(std::size_t page_index,
+                                const std::vector<Rect>& areas) {
+  if (page_index >= pages_.size() || areas.empty()) return false;
+  auto subtract = [](const Rect& rect, const Rect& area, std::vector<Rect>& out) {
+    const double overlap_left = std::max(rect.x, area.x);
+    const double overlap_right = std::min(rect.x + rect.width, area.x + area.width);
+    const double overlap_top = std::max(rect.y, area.y);
+    const double overlap_bottom = std::min(rect.y + rect.height, area.y + area.height);
+    if (overlap_right <= overlap_left || overlap_bottom <= overlap_top) {
+      if (rect.width > 0.0 && rect.height > 0.0) out.push_back(rect);
+      return;
+    }
+    auto add = [&](double x, double y, double width, double height) {
+      if (width > 0.25 && height > 0.25) out.push_back({x, y, width, height});
+    };
+    const double rect_bottom = rect.y + rect.height;
+    const double area_bottom = area.y + area.height;
+    const double rect_right = rect.x + rect.width;
+    const double area_right = area.x + area.width;
+    if (area.y > rect.y) add(rect.x, rect.y, rect.width, area.y - rect.y);
+    if (area_bottom < rect_bottom)
+      add(rect.x, area_bottom, rect.width, rect_bottom - area_bottom);
+    const double middle_top = std::max(rect.y, area.y);
+    const double middle_bottom = std::min(rect_bottom, area_bottom);
+    const double middle_height = middle_bottom - middle_top;
+    if (middle_height > 0.0) {
+      if (area.x > rect.x) add(rect.x, middle_top, area.x - rect.x, middle_height);
+      if (area_right < rect_right)
+        add(area_right, middle_top, rect_right - area_right, middle_height);
+    }
+  };
+  auto rects_equal = [](const std::vector<Rect>& left, const std::vector<Rect>& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+      if (left[i].x != right[i].x || left[i].y != right[i].y ||
+          left[i].width != right[i].width || left[i].height != right[i].height)
+        return false;
+    }
+    return true;
+  };
+
+  std::vector<Annotation> kept;
+  kept.reserve(pages_[page_index].annotations.size());
+  bool changed_any = false;
+  for (auto& annotation : pages_[page_index].annotations) {
+    if (annotation.type != AnnotationType::Highlight) {
+      kept.push_back(annotation);
+      continue;
+    }
+    std::vector<Rect> remaining = annotation.text_rects;
+    if (remaining.empty()) remaining.push_back(annotation.bounds);
+    double original_area = 0.0;
+    for (const auto& rect : remaining)
+      original_area += std::max(0.0, rect.width) * std::max(0.0, rect.height);
+    bool changed = false;
+    for (const auto& area : areas) {
+      std::vector<Rect> next;
+      for (const auto& rect : remaining) subtract(rect, area, next);
+      if (!rects_equal(next, remaining)) changed = true;
+      remaining = std::move(next);
+      if (remaining.empty()) {
+        changed = true;
+        break;
+      }
+    }
+    if (!remaining.empty() && original_area > 0.0) {
+      double remaining_area = 0.0;
+      for (const auto& rect : remaining)
+        remaining_area += std::max(0.0, rect.width) * std::max(0.0, rect.height);
+      // Re-selecting nearly the same passage should remove the whole highlight
+      // instead of leaving thin edge slivers.
+      if (remaining_area <= original_area * 0.2) {
+        remaining.clear();
+        changed = true;
+      }
+    }
+    if (!changed) {
+      kept.push_back(annotation);
+      continue;
+    }
+    changed_any = true;
+    if (remaining.empty()) continue;
+    Rect bounds = remaining.front();
+    for (const auto& rect : remaining) {
+      const double right = std::max(bounds.x + bounds.width, rect.x + rect.width);
+      const double bottom = std::max(bounds.y + bounds.height, rect.y + rect.height);
+      bounds.x = std::min(bounds.x, rect.x);
+      bounds.y = std::min(bounds.y, rect.y);
+      bounds.width = right - bounds.x;
+      bounds.height = bottom - bounds.y;
+    }
+    annotation.text_rects = std::move(remaining);
+    annotation.bounds = bounds;
+    kept.push_back(annotation);
+  }
+  if (!changed_any) return false;
+  checkpoint();
+  pages_[page_index].annotations = std::move(kept);
+  changed();
+  return true;
+}
+
 std::string Document::page_text(std::size_t index) const {
   if (index >= pages_.size() || kind_ != Kind::Pdf) return {};
   const auto& ref = pages_[index];

@@ -207,6 +207,29 @@ void highlight_uses_text_layout() {
   g_unlink(path.c_str());
 }
 
+void erase_highlight_range() {
+  const auto path = fixture_pdf();
+  review::Document doc;
+  std::string error;
+  g_assert_true(doc.open(path, error));
+  review::Annotation highlight;
+  highlight.type = review::AnnotationType::Highlight;
+  highlight.bounds = {20, 20, 100, 10};
+  highlight.text_rects = {{20, 20, 100, 10}};
+  doc.add_annotation(0, highlight);
+  g_assert_cmpuint(doc.page(0).annotations.size(), ==, 1);
+
+  g_assert_true(doc.erase_highlights(0, {{50, 20, 40, 10}}));
+  const auto& trimmed = doc.page(0).annotations.front();
+  g_assert_cmpuint(trimmed.text_rects.size(), ==, 2);
+  g_assert_cmpfloat(trimmed.text_rects.front().width, ==, 30);
+  g_assert_cmpfloat(trimmed.text_rects.back().width, ==, 30);
+
+  g_assert_true(doc.erase_highlights(0, {{0, 0, 200, 100}}));
+  g_assert_cmpuint(doc.page(0).annotations.size(), ==, 0);
+  g_unlink(path.c_str());
+}
+
 void crop_is_destructive() {
   const auto path = fixture_pdf();
   review::Document doc; std::string error;
@@ -430,6 +453,7 @@ int main(int argc, char** argv) {
   g_test_add_func("/document/annotation-edit-properties", annotation_edit_properties);
   g_test_add_func("/document/move-annotation-between-pages", move_annotation_between_pages);
   g_test_add_func("/document/highlight-text-layout", highlight_uses_text_layout);
+  g_test_add_func("/document/erase-highlight", erase_highlight_range);
   g_test_add_func("/document/secure-crop", crop_is_destructive);
   g_test_add_func("/document/page-operations", page_operations);
   g_test_add_func("/document/text-wrap", text_wraps_to_bounds);

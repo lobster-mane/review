@@ -149,7 +149,7 @@ Window::~Window() {
 }
 
 void Window::schedule_preload_next_page() {
-  if (preload_source_id_ || !document_ ||
+  if (pinch_active_ || preload_source_id_ || !document_ ||
       current_page_ + 1 >= document_->page_count())
     return;
   preload_source_id_ = g_idle_add(+[](gpointer data) -> gboolean {
@@ -170,8 +170,9 @@ void Window::clear_page_cache() {
 
 cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
   if (!document_ || page >= document_->page_count()) return nullptr;
+  const bool zoom_changed = page_cache_zoom_ != zoom_;
   if (page_cache_revision_ != document_->revision() ||
-      page_cache_zoom_ != zoom_) {
+      (zoom_changed && !pinch_active_)) {
     clear_page_cache();
   }
   for (auto it = page_cache_.begin(); it != page_cache_.end(); ++it) {
@@ -182,7 +183,11 @@ cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
       return entry.surface;
     }
   }
-  cairo_surface_t* surface = document_->render_page(page, zoom_, true, skip);
+  // While pinching, reuse surfaces at the previous zoom and let the draw code
+  // scale them. This avoids a full page render on every gesture event.
+  const double render_scale =
+      (pinch_active_ && page_cache_zoom_ > 0.0) ? page_cache_zoom_ : zoom_;
+  cairo_surface_t* surface = document_->render_page(page, render_scale, true, skip);
   if (!surface) return nullptr;
   if (page_cache_.size() >= kPageCacheLimit) {
     cairo_surface_destroy(page_cache_.front().surface);
@@ -190,7 +195,8 @@ cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
   }
   page_cache_.push_back({page, skip, surface});
   page_cache_revision_ = document_->revision();
-  page_cache_zoom_ = zoom_;
+  if (!pinch_active_ || page_cache_zoom_ <= 0.0)
+    page_cache_zoom_ = render_scale;
   return surface;
 }
 
@@ -1063,7 +1069,11 @@ void Window::build_ui() {
   })), this);
   g_signal_connect(zoom_gesture, "end", G_CALLBACK(+[](
       GtkGesture*, GdkEventSequence*, gpointer data) {
-    self(data)->pinch_active_ = false;
+    auto* w = self(data);
+    if (!w->pinch_active_) return;
+    w->pinch_active_ = false;
+    w->clear_page_cache();
+    w->render_current();
   }), this);
   gtk_widget_add_controller(GTK_WIDGET(canvas_), GTK_EVENT_CONTROLLER(zoom_gesture));
 
@@ -1575,6 +1585,19 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   cairo_paint(cr);
   if (!w->document_ || w->document_->page_count() == 0) return;
 
+  auto paint_page_surface = [&](cairo_surface_t* surface, double x, double y,
+                                double draw_width, double draw_height) {
+    const int surface_width = cairo_image_surface_get_width(surface);
+    const int surface_height = cairo_image_surface_get_height(surface);
+    if (surface_width <= 0 || surface_height <= 0) return;
+    cairo_save(cr);
+    cairo_translate(cr, x, y);
+    cairo_scale(cr, draw_width / surface_width, draw_height / surface_height);
+    cairo_set_source_surface(cr, surface, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+  };
+
   auto draw_selection = [&](double x, double y) {
     if (w->pointer_mode_ != PointerMode::Select) return;
     const auto* annotation = w->selected_annotation();
@@ -1778,12 +1801,12 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     const std::uint64_t skip = w->inline_edit_active_ ? w->inline_edit_id_ : 0;
     cairo_surface_t* surface = w->cached_page(w->current_page_, skip);
     if (!surface) return;
-    const int sw = cairo_image_surface_get_width(surface);
-    const int sh = cairo_image_surface_get_height(surface);
-    const double x = std::max(0.0, (width - sw) / 2.0);
-    const double y = std::max(0.0, (height - sh) / 2.0);
-    cairo_set_source_surface(cr, surface, x, y);
-    cairo_paint(cr);
+    const auto& page = w->document_->page(w->current_page_);
+    const double draw_width = page.width_points * w->zoom_;
+    const double draw_height = page.height_points * w->zoom_;
+    const double x = std::max(0.0, (width - draw_width) / 2.0);
+    const double y = std::max(0.0, (height - draw_height) / 2.0);
+    paint_page_surface(surface, x, y, draw_width, draw_height);
     draw_selection(x, y);
     draw_edit_bounds(x, y);
     draw_tool_preview(x, y);
@@ -1805,10 +1828,9 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
           w->inline_edit_active_ && i == w->inline_edit_page_ ? w->inline_edit_id_ : 0;
       cairo_surface_t* surface = w->cached_page(i, skip);
       if (surface) {
-        const int sw = cairo_image_surface_get_width(surface);
-        const double x = std::max(0.0, (width - sw) / 2.0);
-        cairo_set_source_surface(cr, surface, x, top);
-        cairo_paint(cr);
+        const double draw_width = page.width_points * w->zoom_;
+        const double x = std::max(0.0, (width - draw_width) / 2.0);
+        paint_page_surface(surface, x, top, draw_width, page_height);
       }
     }
     top = bottom + kPageGap;
@@ -2792,19 +2814,34 @@ void Window::move_dragged_annotation(Annotation& annotation, double dx, double d
   const double py = dy / zoom_ + y_shift;
   if (resizing_annotation_) {
     const Rect old = annotation_edit_origin_.bounds;
-    annotation.bounds.width = std::max(6.0, old.width + px);
-    annotation.bounds.height = std::max(6.0, old.height + py);
-    const double sx = old.width > 0 ? annotation.bounds.width / old.width : 1.0;
-    const double sy = old.height > 0 ? annotation.bounds.height / old.height : 1.0;
-    for (auto& point : annotation.points) {
-      point.x = old.x + (point.x - old.x) * sx;
-      point.y = old.y + (point.y - old.y) * sy;
-    }
-    for (auto& rect : annotation.text_rects) {
-      rect.x = old.x + (rect.x - old.x) * sx;
-      rect.y = old.y + (rect.y - old.y) * sy;
-      rect.width *= sx;
-      rect.height *= sy;
+    if (annotation.type == AnnotationType::Signature &&
+        old.width > 0.0 && old.height > 0.0) {
+      const double scale_x = (old.width + px) / old.width;
+      const double scale_y = (old.height + py) / old.height;
+      double scale = std::abs(scale_x - 1.0) >= std::abs(scale_y - 1.0) ?
+                     scale_x : scale_y;
+      scale = std::max(0.05, scale);
+      annotation.bounds.width = std::max(6.0, old.width * scale);
+      annotation.bounds.height = annotation.bounds.width * old.height / old.width;
+      if (annotation.bounds.height < 6.0) {
+        annotation.bounds.height = 6.0;
+        annotation.bounds.width = 6.0 * old.width / old.height;
+      }
+    } else {
+      annotation.bounds.width = std::max(6.0, old.width + px);
+      annotation.bounds.height = std::max(6.0, old.height + py);
+      const double sx = old.width > 0 ? annotation.bounds.width / old.width : 1.0;
+      const double sy = old.height > 0 ? annotation.bounds.height / old.height : 1.0;
+      for (auto& point : annotation.points) {
+        point.x = old.x + (point.x - old.x) * sx;
+        point.y = old.y + (point.y - old.y) * sy;
+      }
+      for (auto& rect : annotation.text_rects) {
+        rect.x = old.x + (rect.x - old.x) * sx;
+        rect.y = old.y + (rect.y - old.y) * sy;
+        rect.width *= sx;
+        rect.height *= sy;
+      }
     }
   } else {
     annotation.bounds.x += px;
@@ -2840,6 +2877,11 @@ void Window::finish_canvas_drag(double x, double y) {
     const auto rects = document_->highlight_rects(current_page_, drag_start_, end);
     if (rects.empty()) {
       toast("No text selected");
+      return;
+    }
+    if (document_->erase_highlights(current_page_, rects)) {
+      render_current();
+      update_title();
       return;
     }
     Rect text_bounds = rects.front();

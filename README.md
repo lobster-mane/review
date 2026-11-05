@@ -94,7 +94,8 @@ Use the **selection tool** to select an annotation, move or resize it, or change
 its colors and opacity. Press `Delete` to remove the selected annotation. The
 **highlight tool** selects a continuous passage of text between the drag start
 and end points, like text selection in an editor, instead of highlighting the
-area inside a rectangle. Color controls appear only for tools that use them;
+area inside a rectangle. Dragging it over text that is already highlighted
+removes the highlighting. Color controls appear only for tools that use them;
 the marker defaults to translucent yellow while other tools default to a black
 outline with a transparent fill.
 

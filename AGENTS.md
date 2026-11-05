@@ -77,9 +77,13 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   layout, groups them into per-line rectangles, stores them in
   `Annotation::text_rects`, and writes them as multiple highlight quads. The
   character layout is cached per page and invalidated by `revision()`; keep it
-  cached so live highlight previews stay smooth.
+  cached so live highlight previews stay smooth. `Document::erase_highlights()`
+  subtracts a new selection from existing highlights so the marker acts as a
+  toggle.
 - Pinch zoom is handled by a `GtkGestureZoom` on the canvas. It keeps the page
-  point under the gesture in place and switches off fit width. On a touchscreen,
+  point under the gesture in place and switches off fit width. While pinching,
+  `cached_page()` reuses the previous zoom's surfaces and `draw_page()` scales
+  them; rerender at the final zoom only when the gesture ends. On a touchscreen,
   a one-finger drag on empty canvas with the selection tool pans the scrolled
   window instead of selecting.
 - Per-tool stroke/fill defaults live in `Window::tool_colors_`; the marker
@@ -87,7 +91,8 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   transparent fill. Color controls are shown through `property_revealer_`.
 - Signatures are inserted at the center of the current view; compute the view
   center with the canvas bounds rather than assuming the page is aligned with
-  the viewport.
+  the viewport. Signature resize handles preserve the annotation's aspect
+  ratio.
 - Rendered page surfaces are cached in `Window`; `Document::revision()` and
   the zoom level invalidate the cache. Call `Document::invalidate_rendering()`
   for live annotation mutations (moves/resizes) so cached text follows the box.
