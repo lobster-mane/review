@@ -99,7 +99,10 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Rendered page surfaces are cached in `Window`; `Document::revision()` and
   the zoom level invalidate the cache. Call `Document::invalidate_rendering()`
   for live annotation mutations (moves/resizes) so cached text follows the box.
-  `schedule_preload_next_page()` warms the following page in idle time.
+  The sidebar's low-resolution page renders are kept in `page_previews_` so
+  `draw_page()` can show a placeholder immediately, while
+  `schedule_page_render()` renders missing full-resolution pages in idle time.
+  `schedule_preload_next_page()` warms the following page the same way.
 - Inline text editing is an overlay inside `canvas_overlay_`. Call
   `finish_inline_text_edit()` before changing page, zoom, view mode, or layout.
   Newly typed text inherits the current typing style through the editor's

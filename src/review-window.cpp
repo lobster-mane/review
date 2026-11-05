@@ -9,6 +9,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <sys/stat.h>
 
@@ -140,25 +141,69 @@ Window::Window(AdwApplication* application) {
 }
 
 Window::~Window() {
-  if (preload_source_id_) {
-    g_source_remove(preload_source_id_);
-    preload_source_id_ = 0;
+  if (page_render_source_id_) {
+    g_source_remove(page_render_source_id_);
+    page_render_source_id_ = 0;
   }
   clear_page_cache();
+  for (auto* preview : page_previews_)
+    if (preview) cairo_surface_destroy(preview);
+  page_previews_.clear();
   if (recent_menu_) g_object_unref(recent_menu_);
 }
 
 void Window::schedule_preload_next_page() {
-  if (pinch_active_ || preload_source_id_ || !document_ ||
+  if (pinch_active_ || !document_ ||
       current_page_ + 1 >= document_->page_count())
     return;
-  preload_source_id_ = g_idle_add(+[](gpointer data) -> gboolean {
-    auto* w = static_cast<Window*>(data);
-    w->preload_source_id_ = 0;
-    if (w->document_ && w->current_page_ + 1 < w->document_->page_count())
-      w->cached_page(w->current_page_ + 1, 0);
-    return G_SOURCE_REMOVE;
-  }, this);
+  schedule_page_render(current_page_ + 1, 0);
+}
+
+void Window::schedule_page_render(std::size_t page, std::uint64_t skip) {
+  if (!document_ || page >= document_->page_count()) return;
+  if (cached_page(page, skip, false)) return;
+  pending_page_renders_.insert({page, skip});
+  if (!page_render_source_id_)
+    page_render_source_id_ = g_idle_add(Window::render_pending_pages, this);
+}
+
+gboolean Window::render_pending_pages(gpointer data) {
+  auto* w = static_cast<Window*>(data);
+  w->page_render_source_id_ = 0;
+  if (w->pinch_active_) return G_SOURCE_REMOVE;
+  if (!w->document_ || w->pending_page_renders_.empty()) return G_SOURCE_REMOVE;
+
+  auto distance = [](std::size_t left, std::size_t right) {
+    return left > right ? left - right : right - left;
+  };
+  auto best = w->pending_page_renders_.begin();
+  for (auto it = std::next(best); it != w->pending_page_renders_.end(); ++it)
+    if (distance(it->first, w->current_page_) <
+        distance(best->first, w->current_page_))
+      best = it;
+  const auto page = best->first;
+  const auto skip = best->second;
+  w->pending_page_renders_.erase(best);
+
+  bool near_viewport = true;
+  if (w->canvas_scroll_ && w->document_ && page < w->document_->page_count()) {
+    auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
+    const double view_top = gtk_adjustment_get_value(adjustment);
+    const double view_bottom = view_top + gtk_adjustment_get_page_size(adjustment);
+    const double margin = std::max(0.0, (view_bottom - view_top) * 0.5);
+    const double page_top = w->page_top(page);
+    const double page_bottom = page_top +
+        w->document_->page(page).height_points * w->zoom_;
+    near_viewport = page_bottom >= view_top - margin &&
+                    page_top <= view_bottom + margin;
+  }
+  if (near_viewport) {
+    w->cached_page(page, skip);
+    if (w->canvas_) gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
+  }
+  if (!w->pending_page_renders_.empty())
+    w->page_render_source_id_ = g_idle_add(Window::render_pending_pages, w);
+  return G_SOURCE_REMOVE;
 }
 
 void Window::clear_page_cache() {
@@ -168,7 +213,8 @@ void Window::clear_page_cache() {
   page_cache_zoom_ = 0.0;
 }
 
-cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
+cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip,
+                                     bool render_if_missing) {
   if (!document_ || page >= document_->page_count()) return nullptr;
   const bool zoom_changed = page_cache_zoom_ != zoom_;
   if (page_cache_revision_ != document_->revision() ||
@@ -183,6 +229,7 @@ cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
       return entry.surface;
     }
   }
+  if (!render_if_missing) return nullptr;
   // While pinching, reuse surfaces at the previous zoom and let the draw code
   // scale them. This avoids a full page render on every gesture event.
   const double render_scale =
@@ -1251,6 +1298,11 @@ void Window::rebuild_recent_menu() {
 
 void Window::refresh() {
   if (inline_edit_active_) finish_inline_text_edit(true);
+  if (page_render_source_id_) {
+    g_source_remove(page_render_source_id_);
+    page_render_source_id_ = 0;
+  }
+  pending_page_renders_.clear();
   rebuild_sidebar();
   if (document_ && current_page_ >= document_->page_count())
     current_page_ = document_->page_count() - 1;
@@ -1267,13 +1319,20 @@ void Window::rebuild_sidebar() {
     child = next;
   }
   if (!document_) {
+    for (auto* preview : page_previews_)
+      if (preview) cairo_surface_destroy(preview);
+    page_previews_.clear();
     syncing_sidebar_ = false;
     return;
   }
+  for (auto* preview : page_previews_)
+    if (preview) cairo_surface_destroy(preview);
+  page_previews_.assign(document_->page_count(), nullptr);
   for (std::size_t i = 0; i < document_->page_count(); ++i) {
     auto* box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
     cairo_surface_t* surface = document_->render_page(i, .16, true);
     if (surface) {
+      page_previews_[i] = surface;
       const int sw = cairo_image_surface_get_width(surface);
       const int sh = cairo_image_surface_get_height(surface);
       const int stride = cairo_image_surface_get_stride(surface);
@@ -1287,7 +1346,6 @@ void Window::rebuild_sidebar() {
       gtk_box_append(box, picture);
       g_object_unref(texture);
       g_bytes_unref(bytes);
-      cairo_surface_destroy(surface);
     }
     auto* label = gtk_label_new(("Page " + std::to_string(i + 1)).c_str());
     gtk_box_append(box, label);
@@ -1551,6 +1609,11 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   cairo_set_source_rgb(cr, .18, .18, .18);
   cairo_paint(cr);
   if (!w->document_ || w->document_->page_count() == 0) return;
+  const bool revision_stale =
+      w->page_cache_revision_ != w->document_->revision();
+  const bool zoom_stale =
+      !w->pinch_active_ && w->page_cache_zoom_ > 0.0 &&
+      w->page_cache_zoom_ != w->zoom_;
 
   auto paint_page_surface = [&](cairo_surface_t* surface, double x, double y,
                                 double draw_width, double draw_height) {
@@ -1562,6 +1625,23 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     cairo_scale(cr, draw_width / surface_width, draw_height / surface_height);
     cairo_set_source_surface(cr, surface, 0, 0);
     cairo_paint(cr);
+    cairo_restore(cr);
+  };
+
+  auto paint_missing_page = [&](std::size_t page, double x, double y,
+                                double draw_width, double draw_height) {
+    if (page < w->page_previews_.size() && w->page_previews_[page]) {
+      paint_page_surface(w->page_previews_[page], x, y, draw_width, draw_height);
+      return;
+    }
+    cairo_save(cr);
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    cairo_rectangle(cr, x, y, draw_width, draw_height);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.12);
+    cairo_set_line_width(cr, 1.0);
+    cairo_rectangle(cr, x + 0.5, y + 0.5, draw_width - 1.0, draw_height - 1.0);
+    cairo_stroke(cr);
     cairo_restore(cr);
   };
 
@@ -1766,14 +1846,21 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
 
   if (!w->continuous_scroll_) {
     const std::uint64_t skip = w->inline_edit_active_ ? w->inline_edit_id_ : 0;
-    cairo_surface_t* surface = w->cached_page(w->current_page_, skip);
-    if (!surface) return;
+    const bool render_now = skip != 0 || w->drag_active_ || w->crop_mode_ ||
+                            revision_stale || zoom_stale;
+    cairo_surface_t* surface =
+        w->cached_page(w->current_page_, skip, render_now);
     const auto& page = w->document_->page(w->current_page_);
     const double draw_width = page.width_points * w->zoom_;
     const double draw_height = page.height_points * w->zoom_;
     const double x = std::max(0.0, (width - draw_width) / 2.0);
     const double y = std::max(0.0, (height - draw_height) / 2.0);
-    paint_page_surface(surface, x, y, draw_width, draw_height);
+    if (surface) {
+      paint_page_surface(surface, x, y, draw_width, draw_height);
+    } else {
+      if (!w->pinch_active_) w->schedule_page_render(w->current_page_, skip);
+      paint_missing_page(w->current_page_, x, y, draw_width, draw_height);
+    }
     draw_selection(x, y);
     draw_edit_bounds(x, y);
     draw_tool_preview(x, y);
@@ -1793,11 +1880,18 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     if (bottom >= view_top && top <= view_bottom) {
       const std::uint64_t skip =
           w->inline_edit_active_ && i == w->inline_edit_page_ ? w->inline_edit_id_ : 0;
-      cairo_surface_t* surface = w->cached_page(i, skip);
+      const bool render_now =
+          skip != 0 || (i == w->current_page_ &&
+                        (w->drag_active_ || w->crop_mode_ || revision_stale ||
+                         zoom_stale));
+      cairo_surface_t* surface = w->cached_page(i, skip, render_now);
+      const double draw_width = page.width_points * w->zoom_;
+      const double x = std::max(0.0, (width - draw_width) / 2.0);
       if (surface) {
-        const double draw_width = page.width_points * w->zoom_;
-        const double x = std::max(0.0, (width - draw_width) / 2.0);
         paint_page_surface(surface, x, top, draw_width, page_height);
+      } else {
+        if (!w->pinch_active_) w->schedule_page_render(i, skip);
+        paint_missing_page(i, x, top, draw_width, page_height);
       }
     }
     top = bottom + kPageGap;

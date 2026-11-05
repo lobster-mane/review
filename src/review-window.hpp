@@ -7,6 +7,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,7 +33,10 @@ private:
   void refresh();
   void rebuild_sidebar();
   void render_current();
-  cairo_surface_t* cached_page(std::size_t page, std::uint64_t skip);
+  cairo_surface_t* cached_page(std::size_t page, std::uint64_t skip,
+                               bool render_if_missing = true);
+  void schedule_page_render(std::size_t page, std::uint64_t skip);
+  static gboolean render_pending_pages(gpointer data);
   void clear_page_cache();
   void schedule_preload_next_page();
   void update_title();
@@ -141,7 +145,9 @@ private:
   std::vector<CachedPage> page_cache_;
   std::uint64_t page_cache_revision_{};
   double page_cache_zoom_{};
-  guint preload_source_id_{};
+  std::vector<cairo_surface_t*> page_previews_{};
+  std::set<std::pair<std::size_t, std::uint64_t>> pending_page_renders_{};
+  guint page_render_source_id_{};
   SignatureStore signatures_{};
   std::size_t current_page_{};
   double zoom_{1.0};
