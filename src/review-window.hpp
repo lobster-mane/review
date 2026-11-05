@@ -4,6 +4,7 @@
 #include "signature-store.hpp"
 
 #include <adwaita.h>
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,10 +58,11 @@ private:
   void add_simple_annotation(AnnotationType type);
   void start_destructive(bool crop);
   void set_tool(AnnotationType type);
-  void set_hand_tool();
   void set_select_tool();
   Annotation* selected_annotation();
   const Annotation* selected_annotation() const;
+  Annotation* annotation_at(std::size_t page, std::uint64_t id);
+  const Annotation* annotation_at(std::size_t page, std::uint64_t id) const;
   void select_annotation_at(Point point);
   void sync_annotation_controls();
   void apply_annotation_controls(bool text_and_font);
@@ -74,6 +76,12 @@ private:
   void apply_inline_annotation_controls(bool text_and_font);
   void sync_inline_format_controls();
   void update_text_format_visibility();
+  void reset_tool_colors();
+  void apply_tool_colors(AnnotationType type);
+  void show_current_page(std::size_t page);
+  void sync_sidebar_selection(std::size_t page);
+  void move_dragged_annotation(Annotation& annotation, double dx, double dy,
+                               double x_shift, double y_shift);
   void choose_font();
   void update_font_button_label();
   [[nodiscard]] TextStyle inline_style_at_offset(int offset) const;
@@ -106,6 +114,9 @@ private:
   GtkToggleButton* select_button_{};
   GtkColorDialogButton* stroke_color_{};
   GtkColorDialogButton* fill_color_{};
+  GtkRevealer* property_revealer_{};
+  GtkWidget* stroke_control_{};
+  GtkWidget* fill_control_{};
   GtkBox* text_format_box_{};
   GtkButton* font_button_{};
   GtkToggleButton* bold_button_{};
@@ -141,10 +152,15 @@ private:
   bool warned_destructive_{};
   bool tool_active_{};
   bool crop_mode_{};
-  enum class PointerMode { Hand, Select, Annotate } pointer_mode_{PointerMode::Hand};
+  enum class PointerMode { Select, Annotate } pointer_mode_{PointerMode::Select};
   AnnotationType active_tool_{AnnotationType::Rectangle};
-  Color annotation_stroke_{};
-  Color annotation_fill_{1.0, 0.92, 0.23, 0.35};
+  struct ToolColors {
+    Color stroke{0.0, 0.0, 0.0, 1.0};
+    Color fill{0.0, 0.0, 0.0, 0.0};
+  };
+  std::array<ToolColors, 8> tool_colors_{};
+  Color annotation_stroke_{0.0, 0.0, 0.0, 1.0};
+  Color annotation_fill_{0.0, 0.0, 0.0, 0.0};
   std::string annotation_font_{"Sans"};
   double annotation_font_size_{12.0};
   bool annotation_bold_{};
@@ -158,10 +174,12 @@ private:
   Annotation annotation_edit_origin_{};
   Point drag_start_{};
   Point drag_current_{};
+  Point drag_origin_canvas_{};
   bool drag_active_{};
   bool drag_is_text_{};
-  double pan_horizontal_start_{};
-  double pan_vertical_start_{};
+  std::size_t annotation_drag_page_{};
+  std::size_t annotation_origin_page_{};
+  std::uint64_t annotation_drag_id_{};
   gint64 last_edge_page_change_{};
   gint64 edge_scroll_start_{};
   double edge_scroll_accum_{};

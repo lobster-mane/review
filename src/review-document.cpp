@@ -507,8 +507,15 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale,
     switch (a.type) {
       case AnnotationType::Highlight:
         cairo_set_source_rgba(cr, a.fill.red, a.fill.green, a.fill.blue, a.fill.alpha);
-        cairo_rectangle(cr, b.x, b.y, b.width, b.height);
-        cairo_fill(cr);
+        if (!a.text_rects.empty()) {
+          for (const auto& rect : a.text_rects) {
+            cairo_rectangle(cr, rect.x, rect.y, rect.width, rect.height);
+            cairo_fill(cr);
+          }
+        } else {
+          cairo_rectangle(cr, b.x, b.y, b.width, b.height);
+          cairo_fill(cr);
+        }
         break;
       case AnnotationType::Rectangle:
         cairo_set_source_rgba(cr, a.fill.red, a.fill.green, a.fill.blue, a.fill.alpha);
@@ -573,6 +580,82 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale,
     cairo_restore(cr);
   }
   cairo_restore(cr);
+}
+
+std::vector<Rect> Document::highlight_rects(std::size_t index, Rect area) const {
+  std::vector<Rect> result;
+  if (index >= pages_.size() || kind_ != Kind::Pdf) return result;
+  const auto& ref = pages_[index];
+  if (ref.rasterized || ref.secure_crop.active || ref.rotation != 0) return result;
+  if (area.width <= 0.0 || area.height <= 0.0) return result;
+
+  std::string ignored;
+  PopplerDocument* source = (pdf_ && ref.source_path == path_) ?
+      static_cast<PopplerDocument*>(g_object_ref(pdf_)) : load_pdf(ref.source_path, ignored);
+  if (!source) return result;
+  PopplerPage* page = poppler_document_get_page(source, ref.source_index);
+  if (!page) {
+    g_object_unref(source);
+    return result;
+  }
+
+  PopplerRectangle* rectangles = nullptr;
+  guint count = 0;
+  if (poppler_page_get_text_layout(page, &rectangles, &count)) {
+    struct Line {
+      double top{};
+      double bottom{};
+      double left{};
+      double right{};
+    };
+    std::vector<Line> lines;
+    for (guint i = 0; i < count; ++i) {
+      const auto& r = rectangles[i];
+      const Rect character{r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1};
+      if (character.width <= 0.0 || character.height <= 0.0) continue;
+      const double overlap_x = std::min(character.x + character.width, area.x + area.width) -
+                               std::max(character.x, area.x);
+      const double overlap_y = std::min(character.y + character.height, area.y + area.height) -
+                               std::max(character.y, area.y);
+      if (overlap_x <= 0.0 || overlap_y <= 0.0) continue;
+      // Ignore a character that the drag only clips at its very edge.
+      if (overlap_x < character.width * 0.15 &&
+          overlap_y < character.height * 0.15)
+        continue;
+
+      const double center = character.y + character.height / 2.0;
+      Line* line = nullptr;
+      for (auto& candidate : lines) {
+        const double candidate_height = candidate.bottom - candidate.top;
+        const double overlap = std::min(candidate.bottom, character.y + character.height) -
+                               std::max(candidate.top, character.y);
+        if (overlap > std::min(candidate_height, character.height) * 0.5 &&
+            std::abs(center - (candidate.top + candidate.bottom) / 2.0) <
+                std::max(candidate_height, character.height) * 0.75) {
+          line = &candidate;
+          break;
+        }
+      }
+      if (!line) {
+        lines.push_back({character.y, character.y + character.height,
+                         character.x, character.x + character.width});
+      } else {
+        line->top = std::min(line->top, character.y);
+        line->bottom = std::max(line->bottom, character.y + character.height);
+        line->left = std::min(line->left, character.x);
+        line->right = std::max(line->right, character.x + character.width);
+      }
+    }
+    for (const auto& line : lines) {
+      if (line.right > line.left && line.bottom > line.top)
+        result.push_back({line.left, line.top, line.right - line.left,
+                          line.bottom - line.top});
+    }
+  }
+  g_free(rectangles);
+  g_object_unref(page);
+  g_object_unref(source);
+  return result;
 }
 
 std::string Document::page_text(std::size_t index) const {
@@ -700,6 +783,23 @@ bool Document::update_annotation(std::size_t page_index, std::uint64_t id,
   found->id = id;
   if (found->type == AnnotationType::TextBox)
     found->bounds = fit_text_bounds(*found);
+  changed();
+  return true;
+}
+
+bool Document::move_annotation(std::size_t from_page, std::uint64_t id,
+                               std::size_t to_page, const Annotation& annotation) {
+  if (from_page >= pages_.size() || to_page >= pages_.size()) return false;
+  auto& source = pages_[from_page].annotations;
+  const auto found = std::find_if(source.begin(), source.end(),
+                                  [id](const Annotation& a) { return a.id == id; });
+  if (found == source.end()) return false;
+  Annotation moved = annotation;
+  moved.id = id;
+  if (moved.type == AnnotationType::TextBox)
+    moved.bounds = fit_text_bounds(moved);
+  source.erase(found);
+  pages_[to_page].annotations.push_back(std::move(moved));
   changed();
   return true;
 }
@@ -877,7 +977,18 @@ bool Document::write_pdf_annotations(const std::string& path, std::string& error
       switch (a.type) {
         case AnnotationType::Highlight:
           quads = g_array_new(FALSE, FALSE, sizeof(PopplerQuadrilateral));
-          g_array_append_val(quads, quad);
+          if (!a.text_rects.empty()) {
+            for (const auto& text_rect : a.text_rects) {
+              PopplerQuadrilateral text_quad{
+                {text_rect.x, ref.height_points - (text_rect.y + text_rect.height)},
+                {text_rect.x + text_rect.width, ref.height_points - (text_rect.y + text_rect.height)},
+                {text_rect.x, ref.height_points - text_rect.y},
+                {text_rect.x + text_rect.width, ref.height_points - text_rect.y}};
+              g_array_append_val(quads, text_quad);
+            }
+          } else {
+            g_array_append_val(quads, quad);
+          }
           annotation = poppler_annot_text_markup_new_highlight(document, &rect, quads);
           g_array_unref(quads);
           break;

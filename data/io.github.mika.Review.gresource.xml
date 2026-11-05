@@ -12,7 +12,6 @@
     <file>icons/scalable/actions/review-signature-symbolic.svg</file>
     <file>icons/scalable/actions/review-crop-symbolic.svg</file>
     <file>icons/scalable/actions/review-scan-symbolic.svg</file>
-    <file>icons/scalable/actions/review-hand-symbolic.svg</file>
     <file>icons/scalable/actions/review-select-symbolic.svg</file>
   </gresource>
 </gresources>

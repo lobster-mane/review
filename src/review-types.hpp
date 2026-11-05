@@ -65,6 +65,7 @@ struct Annotation {
   AnnotationType type{AnnotationType::Rectangle};
   Rect bounds{};                  // PDF points in unrotated page coordinates
   std::vector<Point> points{};    // ink path or line endpoints
+  std::vector<Rect> text_rects{}; // per-line text-highlight rectangles
   std::string text{};
   std::string signature_path{};
   Color stroke{};

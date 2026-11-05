@@ -65,6 +65,17 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Continuous mode renders all pages in one drawing area. `page_top` and
   `page_at_canvas_y` are the layout source of truth; keep drawing, drag
   mapping, and scroll sync consistent with them.
+- The sidebar supports multi-page selection (`Ctrl`/`Shift`). `set_current_page`
+  must not clear a multi-row selection; batch actions consume `selected_pages()`.
+- Dragging an annotation across a page boundary in continuous mode transfers it
+  with `Document::move_annotation()`; keep the source/target page offsets in
+  sync with `page_top` and the centered page x offset.
+- The highlight tool is a text selector. `Document::highlight_rects()` returns
+  per-line rectangles from Poppler's text layout; they are stored in
+  `Annotation::text_rects` and written as multiple highlight quads.
+- Per-tool stroke/fill defaults live in `Window::tool_colors_`; the marker
+  (highlight) defaults to translucent yellow and other tools to black with a
+  transparent fill. Color controls are shown through `property_revealer_`.
 - Rendered page surfaces are cached in `Window`; `Document::revision()` and
   the zoom level invalidate the cache. Call `Document::invalidate_rendering()`
   for live annotation mutations (moves/resizes) so cached text follows the box.

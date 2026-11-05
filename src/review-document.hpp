@@ -40,6 +40,7 @@ public:
   cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true,
                                std::uint64_t skip_annotation_id = 0) const;
   std::string page_text(std::size_t index) const;
+  [[nodiscard]] std::vector<Rect> highlight_rects(std::size_t index, Rect area) const;
 
   void checkpoint();
   bool undo();
@@ -52,6 +53,8 @@ public:
   void add_annotation(std::size_t page_index, Annotation annotation);
   bool update_annotation(std::size_t page_index, std::uint64_t id,
                          const Annotation& annotation);
+  bool move_annotation(std::size_t from_page, std::uint64_t id, std::size_t to_page,
+                       const Annotation& annotation);
   bool remove_annotation(std::size_t page_index, std::uint64_t id);
   void begin_annotation_edit();
   void commit_annotation_edit();

@@ -23,6 +23,22 @@ std::string fixture_pdf() {
   return path;
 }
 
+std::string fixture_text_pdf() {
+  const auto path = (std::filesystem::temp_directory_path() /
+                     ("review-text-test-" + std::to_string(g_get_monotonic_time()) + ".pdf")).string();
+  cairo_surface_t* surface = cairo_pdf_surface_create(path.c_str(), 320, 200);
+  cairo_t* cr = cairo_create(surface);
+  cairo_set_source_rgb(cr, 1, 1, 1); cairo_paint(cr);
+  cairo_set_source_rgb(cr, .05, .05, .05);
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 24);
+  cairo_move_to(cr, 40, 100);
+  cairo_show_text(cr, "Hello");
+  cairo_show_page(cr);
+  cairo_destroy(cr); cairo_surface_destroy(surface);
+  return path;
+}
+
 void assert_annotation_appearances(const std::string& pdf_path) {
   const auto qdf_path = pdf_path + ".qdf.pdf";
   gchar* argv[] = {
@@ -151,6 +167,44 @@ void annotation_edit_properties() {
   g_unlink(fixture.c_str());
 }
 
+void move_annotation_between_pages() {
+  const auto path = fixture_pdf();
+  review::Document doc;
+  std::string error;
+  g_assert_true(doc.open(path, error));
+  auto pages = doc.copy_pages({0});
+  doc.insert_pages(pages, 1);
+  g_assert_cmpuint(doc.page_count(), ==, 2);
+
+  review::Annotation annotation;
+  annotation.type = review::AnnotationType::Rectangle;
+  annotation.bounds = {20, 30, 80, 50};
+  doc.add_annotation(0, annotation);
+  const auto id = doc.page(0).annotations.front().id;
+
+  auto moved = doc.page(0).annotations.front();
+  moved.bounds.x += 40;
+  g_assert_true(doc.move_annotation(0, id, 1, moved));
+  g_assert_cmpuint(doc.page(0).annotations.size(), ==, 0);
+  g_assert_cmpuint(doc.page(1).annotations.size(), ==, 1);
+  g_assert_cmpuint(doc.page(1).annotations.front().id, ==, id);
+  g_assert_cmpfloat(doc.page(1).annotations.front().bounds.x, ==, 60);
+  g_unlink(path.c_str());
+}
+
+void highlight_uses_text_layout() {
+  const auto path = fixture_text_pdf();
+  review::Document doc;
+  std::string error;
+  g_assert_true(doc.open(path, error));
+  const auto rects = doc.highlight_rects(0, {20, 70, 240, 60});
+  g_assert_cmpuint(rects.size(), >=, 1);
+  g_assert_cmpfloat(rects.front().width, >, 0);
+  g_assert_cmpfloat(rects.front().height, >, 0);
+  g_assert_true(doc.highlight_rects(0, {0, 160, 300, 30}).empty());
+  g_unlink(path.c_str());
+}
+
 void crop_is_destructive() {
   const auto path = fixture_pdf();
   review::Document doc; std::string error;
@@ -242,6 +296,13 @@ void save_annotations() {
   circle.bounds = {130, 20, 50, 35};
   doc.add_annotation(0, circle);
 
+  review::Annotation marker;
+  marker.type = review::AnnotationType::Highlight;
+  marker.bounds = {60, 70, 120, 28};
+  marker.fill = {1.0, 0.92, 0.23, 0.35};
+  marker.text_rects = {{60, 70, 100, 12}, {60, 86, 80, 12}};
+  doc.add_annotation(0, marker);
+
   review::Annotation ink;
   ink.type = review::AnnotationType::Ink;
   ink.bounds = {30, 100, 90, 35};
@@ -277,9 +338,11 @@ void save_annotations() {
   GList* annotations = poppler_page_get_annot_mapping(page);
   g_assert_nonnull(annotations);
   int squares = 0, circles = 0, free_texts = 0, text_notes = 0, inks = 0, stamps = 0;
+  int highlights = 0;
   for (GList* item = annotations; item; item = item->next) {
     auto* mapping = static_cast<PopplerAnnotMapping*>(item->data);
     switch (poppler_annot_get_annot_type(mapping->annot)) {
+      case POPPLER_ANNOT_HIGHLIGHT: ++highlights; break;
       case POPPLER_ANNOT_SQUARE: {
         ++squares;
         auto* interior = poppler_annot_square_get_interior_color(
@@ -321,6 +384,7 @@ void save_annotations() {
   }
   g_assert_cmpint(squares, ==, 1);
   g_assert_cmpint(circles, ==, 1);
+  g_assert_cmpint(highlights, ==, 1);
   g_assert_cmpint(free_texts, ==, 1);
   g_assert_cmpint(text_notes, ==, 0);
 #ifdef HAVE_POPPLER_INK_API
@@ -362,6 +426,8 @@ int main(int argc, char** argv) {
   g_test_add_func("/document/open-render", open_and_render);
   g_test_add_func("/document/annotation-undo-redo", annotation_undo_redo);
   g_test_add_func("/document/annotation-edit-properties", annotation_edit_properties);
+  g_test_add_func("/document/move-annotation-between-pages", move_annotation_between_pages);
+  g_test_add_func("/document/highlight-text-layout", highlight_uses_text_layout);
   g_test_add_func("/document/secure-crop", crop_is_destructive);
   g_test_add_func("/document/page-operations", page_operations);
   g_test_add_func("/document/text-wrap", text_wraps_to_bounds);

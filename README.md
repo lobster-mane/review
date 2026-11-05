@@ -84,11 +84,15 @@ does not encrypt them.
 
 Review includes highlight, text, freehand ink, rectangle, ellipse, arrow, and
 signature tools. A tool stays active after use, so you can add several
-annotations in a row.
+annotations in a row. Dragging an annotation across a page boundary in
+continuous view moves it to that page instead of losing it.
 
-Use the **hand tool** to pan without editing. Use the **selection tool** to
-select an annotation, move or resize it, or change its colors and opacity.
-Press `Delete` to remove the selected annotation.
+Use the **selection tool** to select an annotation, move or resize it, or change
+its colors and opacity. Press `Delete` to remove the selected annotation. The
+**highlight tool** selects text and highlights the lines under the dragged
+area instead of drawing a rectangle. Color controls appear only for tools that
+use them; the marker defaults to translucent yellow while other tools default
+to a black outline with a transparent fill.
 
 With the text tool, click the page to create a small text box, or drag to size
 it; the box outline is shown while dragging. Double-click a text annotation to
@@ -117,8 +121,10 @@ It bakes in visible annotations and removes text, links, forms, and other
 interactive content from those pages. It is not OCR.
 
 **Secure Crop** renders only the chosen rectangle into a new page, so content
-outside it is removed rather than merely hidden. It is not a general redaction
-tool for several unrelated areas in the middle of a page.
+outside it is removed rather than merely hidden. The tool shows a guiding
+border around the page and dims the area outside the live selection while you
+drag. It is not a general redaction tool for several unrelated areas in the
+middle of a page.
 
 Both operations are destructive; use **Save As…** or **Export Flattened Copy…**
 to keep the original.

@@ -20,6 +20,45 @@ namespace {
 constexpr double kPageGap = 12.0;
 constexpr double kCanvasMargin = 24.0;
 constexpr std::size_t kPageCacheLimit = 6;
+constexpr std::size_t kToolColorCount = 8;
+
+std::size_t tool_color_index(AnnotationType type) {
+  return static_cast<std::size_t>(type);
+}
+
+Color default_tool_stroke(AnnotationType) {
+  return {0.0, 0.0, 0.0, 1.0};
+}
+
+Color default_tool_fill(AnnotationType type) {
+  if (type == AnnotationType::Highlight) return {1.0, 0.92, 0.23, 0.35};
+  return {0.0, 0.0, 0.0, 0.0};
+}
+
+const char* tool_color_key(AnnotationType type) {
+  switch (type) {
+    case AnnotationType::Highlight: return "highlight";
+    case AnnotationType::TextBox: return "text";
+    case AnnotationType::Ink: return "ink";
+    case AnnotationType::Rectangle: return "rectangle";
+    case AnnotationType::Ellipse: return "ellipse";
+    case AnnotationType::Line: return "line";
+    case AnnotationType::Arrow: return "arrow";
+    case AnnotationType::Signature: return "signature";
+  }
+  return "rectangle";
+}
+
+bool tool_uses_stroke(AnnotationType type) {
+  return type == AnnotationType::TextBox || type == AnnotationType::Ink ||
+         type == AnnotationType::Rectangle || type == AnnotationType::Ellipse ||
+         type == AnnotationType::Line || type == AnnotationType::Arrow;
+}
+
+bool tool_uses_fill(AnnotationType type) {
+  return type == AnnotationType::Highlight || type == AnnotationType::Rectangle ||
+         type == AnnotationType::Ellipse;
+}
 
 std::vector<PageRef> page_clipboard;
 bool clipboard_is_cut = false;
@@ -69,6 +108,7 @@ Window::Window(AdwApplication* application) {
   window_ = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(application)));
   gtk_window_set_default_size(GTK_WINDOW(window_), 1100, 760);
   gtk_window_set_icon_name(GTK_WINDOW(window_), "io.github.mika.Review");
+  reset_tool_colors();
   load_preferences();
   build_ui();
   install_actions();
@@ -180,6 +220,30 @@ void Window::present() {
   }, request, nullptr);
 }
 
+void Window::reset_tool_colors() {
+  for (std::size_t i = 0; i < kToolColorCount; ++i) {
+    const auto type = static_cast<AnnotationType>(i);
+    tool_colors_[i].stroke = default_tool_stroke(type);
+    tool_colors_[i].fill = default_tool_fill(type);
+  }
+}
+
+void Window::apply_tool_colors(AnnotationType type) {
+  const auto& colors = tool_colors_[tool_color_index(type)];
+  annotation_stroke_ = colors.stroke;
+  annotation_fill_ = colors.fill;
+  if (!stroke_color_ || !fill_color_) return;
+  const bool was_updating = updating_annotation_controls_;
+  updating_annotation_controls_ = true;
+  GdkRGBA stroke{colors.stroke.red, colors.stroke.green,
+                 colors.stroke.blue, colors.stroke.alpha};
+  GdkRGBA fill{colors.fill.red, colors.fill.green,
+               colors.fill.blue, colors.fill.alpha};
+  gtk_color_dialog_button_set_rgba(stroke_color_, &stroke);
+  gtk_color_dialog_button_set_rgba(fill_color_, &fill);
+  updating_annotation_controls_ = was_updating;
+}
+
 void Window::load_preferences() {
   const auto path = fs::path(g_get_user_config_dir()) / "review" / "preferences.ini";
   auto* key_file = g_key_file_new();
@@ -191,18 +255,28 @@ void Window::load_preferences() {
     if (!g_key_file_has_key(key_file, "Annotations", key, nullptr)) return fallback;
     return std::clamp(g_key_file_get_double(key_file, "Annotations", key, nullptr), 0.0, 1.0);
   };
-  annotation_stroke_ = {
-    read_component("stroke-red", annotation_stroke_.red),
-    read_component("stroke-green", annotation_stroke_.green),
-    read_component("stroke-blue", annotation_stroke_.blue),
-    read_component("stroke-alpha", annotation_stroke_.alpha),
-  };
-  annotation_fill_ = {
-    read_component("fill-red", annotation_fill_.red),
-    read_component("fill-green", annotation_fill_.green),
-    read_component("fill-blue", annotation_fill_.blue),
-    read_component("fill-alpha", annotation_fill_.alpha),
-  };
+  for (std::size_t i = 0; i < kToolColorCount; ++i) {
+    const auto type = static_cast<AnnotationType>(i);
+    const std::string suffix = tool_color_key(type);
+    auto read_for_tool = [&](const char* component, double fallback) {
+      const std::string key = std::string(component) + "-" + suffix;
+      return read_component(key.c_str(), fallback);
+    };
+    auto& colors = tool_colors_[i];
+    colors.stroke = {
+      read_for_tool("stroke-red", colors.stroke.red),
+      read_for_tool("stroke-green", colors.stroke.green),
+      read_for_tool("stroke-blue", colors.stroke.blue),
+      read_for_tool("stroke-alpha", colors.stroke.alpha),
+    };
+    colors.fill = {
+      read_for_tool("fill-red", colors.fill.red),
+      read_for_tool("fill-green", colors.fill.green),
+      read_for_tool("fill-blue", colors.fill.blue),
+      read_for_tool("fill-alpha", colors.fill.alpha),
+    };
+  }
+  apply_tool_colors(active_tool_);
   if (char* family = g_key_file_get_string(key_file, "Annotations", "font-family", nullptr)) {
     annotation_font_ = family;
     g_free(family);
@@ -229,14 +303,23 @@ void Window::save_preferences() const {
   const auto path = directory / "preferences.ini";
   if (g_mkdir_with_parents(directory.c_str(), 0700) != 0) return;
   auto* key_file = g_key_file_new();
-  g_key_file_set_double(key_file, "Annotations", "stroke-red", annotation_stroke_.red);
-  g_key_file_set_double(key_file, "Annotations", "stroke-green", annotation_stroke_.green);
-  g_key_file_set_double(key_file, "Annotations", "stroke-blue", annotation_stroke_.blue);
-  g_key_file_set_double(key_file, "Annotations", "stroke-alpha", annotation_stroke_.alpha);
-  g_key_file_set_double(key_file, "Annotations", "fill-red", annotation_fill_.red);
-  g_key_file_set_double(key_file, "Annotations", "fill-green", annotation_fill_.green);
-  g_key_file_set_double(key_file, "Annotations", "fill-blue", annotation_fill_.blue);
-  g_key_file_set_double(key_file, "Annotations", "fill-alpha", annotation_fill_.alpha);
+  for (std::size_t i = 0; i < kToolColorCount; ++i) {
+    const auto type = static_cast<AnnotationType>(i);
+    const std::string suffix = tool_color_key(type);
+    const auto& colors = tool_colors_[i];
+    auto write = [&](const char* component, double value) {
+      const std::string key = std::string(component) + "-" + suffix;
+      g_key_file_set_double(key_file, "Annotations", key.c_str(), value);
+    };
+    write("stroke-red", colors.stroke.red);
+    write("stroke-green", colors.stroke.green);
+    write("stroke-blue", colors.stroke.blue);
+    write("stroke-alpha", colors.stroke.alpha);
+    write("fill-red", colors.fill.red);
+    write("fill-green", colors.fill.green);
+    write("fill-blue", colors.fill.blue);
+    write("fill-alpha", colors.fill.alpha);
+  }
   g_key_file_set_string(key_file, "Annotations", "font-family", annotation_font_.c_str());
   g_key_file_set_double(key_file, "Annotations", "font-size", annotation_font_size_);
   g_key_file_set_boolean(key_file, "Annotations", "bold", annotation_bold_);
@@ -328,7 +411,7 @@ void Window::build_ui() {
   gtk_widget_set_margin_bottom(GTK_WIDGET(annotation_bar), 6);
 
   const struct { const char* icon; const char* tip; AnnotationType type; } tools[] = {
-    {"review-highlight-symbolic", "Highlight", AnnotationType::Highlight},
+    {"review-highlight-symbolic", "Highlight text (marker)", AnnotationType::Highlight},
     {"review-text-symbolic", "Text box (drag, then type)", AnnotationType::TextBox},
     {"review-ink-symbolic", "Freehand ink", AnnotationType::Ink},
     {"review-rectangle-symbolic", "Rectangle", AnnotationType::Rectangle},
@@ -351,8 +434,7 @@ void Window::build_ui() {
         w->active_tool_button_ = button;
         const int mode = GPOINTER_TO_INT(
             g_object_get_data(G_OBJECT(button), "tool-mode"));
-        if (mode == -2) w->set_hand_tool();
-        else if (mode == -1) w->set_select_tool();
+        if (mode == -1) w->set_select_tool();
         else w->set_tool(static_cast<AnnotationType>(mode));
         if (mode >= 0 && !w->tool_active_) {
           w->active_tool_button_ = nullptr;
@@ -368,7 +450,6 @@ void Window::build_ui() {
     return button;
   };
 
-  auto* hand_button = add_tool_button("review-hand-symbolic", "Hand tool (pan without annotating)", -2);
   select_button_ = add_tool_button("review-select-symbolic", "Select, move, and resize annotations", -1);
   for (const auto& tool : tools) {
     add_tool_button(tool.icon, tool.tip, static_cast<int>(tool.type));
@@ -385,10 +466,13 @@ void Window::build_ui() {
   g_signal_connect_swapped(stroke_color_, "notify::rgba", G_CALLBACK(+[](Window* w) {
     if (!w->updating_annotation_controls_) w->apply_annotation_controls(false);
   }), this);
+  auto* stroke_control = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6));
+  stroke_control_ = GTK_WIDGET(stroke_control);
   auto* stroke_label = gtk_label_new("Outline/Text");
   gtk_widget_add_css_class(stroke_label, "dim-label");
-  append_button(property_row, stroke_label);
-  append_button(property_row, GTK_WIDGET(stroke_color_));
+  append_button(stroke_control, stroke_label);
+  append_button(stroke_control, GTK_WIDGET(stroke_color_));
+  append_button(property_row, stroke_control_);
 
   auto* fill_dialog = gtk_color_dialog_new();
   gtk_color_dialog_set_title(fill_dialog, "Choose fill color");
@@ -401,10 +485,13 @@ void Window::build_ui() {
   g_signal_connect_swapped(fill_color_, "notify::rgba", G_CALLBACK(+[](Window* w) {
     if (!w->updating_annotation_controls_) w->apply_annotation_controls(false);
   }), this);
+  auto* fill_control = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6));
+  fill_control_ = GTK_WIDGET(fill_control);
   auto* fill_label = gtk_label_new("Fill/Highlight");
   gtk_widget_add_css_class(fill_label, "dim-label");
-  append_button(property_row, fill_label);
-  append_button(property_row, GTK_WIDGET(fill_color_));
+  append_button(fill_control, fill_label);
+  append_button(fill_control, GTK_WIDGET(fill_color_));
+  append_button(property_row, fill_control_);
 
   text_format_box_ = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8));
   append_button(property_row, GTK_WIDGET(text_format_box_));
@@ -471,9 +558,15 @@ void Window::build_ui() {
   auto* scan = icon_button("review-scan-symbolic", "Convert selected pages to 300 DPI color images");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(scan), "win.scan-pages");
   append_button(tool_row, scan);
-  gtk_toggle_button_set_active(hand_button, TRUE);
+  property_revealer_ = GTK_REVEALER(gtk_revealer_new());
+  gtk_revealer_set_transition_type(property_revealer_,
+                                   GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+  gtk_revealer_set_transition_duration(property_revealer_, 160);
+  gtk_revealer_set_child(property_revealer_, GTK_WIDGET(property_row));
+  gtk_revealer_set_reveal_child(property_revealer_, FALSE);
   gtk_box_append(annotation_bar, GTK_WIDGET(tool_row));
-  gtk_box_append(annotation_bar, GTK_WIDGET(property_row));
+  gtk_box_append(annotation_bar, GTK_WIDGET(property_revealer_));
+  gtk_toggle_button_set_active(select_button_, TRUE);
   adw_toolbar_view_add_top_bar(toolbar_view, GTK_WIDGET(annotation_bar));
 
   split_ = GTK_PANED(gtk_paned_new(GTK_ORIENTATION_HORIZONTAL));
@@ -493,7 +586,11 @@ void Window::build_ui() {
   gtk_paned_set_start_child(split_, GTK_WIDGET(sidebar_scroll));
   g_signal_connect_swapped(sidebar_, "row-activated", G_CALLBACK(+[](
       Window* w, GtkListBoxRow* row) {
-    if (row) w->select_page(row_index(row));
+    if (!row) return;
+    GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
+    const bool single = rows && !rows->next;
+    g_list_free(rows);
+    if (single) w->select_page(row_index(row));
   }), this);
   g_signal_connect(sidebar_, "row-selected", G_CALLBACK(+[](
       GtkListBox*, GtkListBoxRow* row, gpointer data) {
@@ -504,6 +601,7 @@ void Window::build_ui() {
     const auto page = row_index(row);
     g_list_free(rows);
     if (single) w->select_page(page);
+    w->update_page_status();
   }), this);
   auto* file_drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
   g_signal_connect(file_drop, "drop", G_CALLBACK(+[](
@@ -696,17 +794,14 @@ void Window::build_ui() {
       w->finish_inline_text_edit(true);
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
     if (w->continuous_scroll_) w->set_current_page(w->page_at_canvas_y(y));
+    w->drag_origin_canvas_ = {x, y};
     w->drag_start_ = w->canvas_to_page(x, y);
     w->drag_current_ = w->drag_start_;
     w->drag_is_text_ = w->tool_active_ && w->active_tool_ == AnnotationType::TextBox;
-    w->drag_active_ = w->drag_is_text_;
-    if (w->pointer_mode_ == PointerMode::Hand && !w->crop_mode_) {
-      w->pan_horizontal_start_ = gtk_adjustment_get_value(
-          gtk_scrolled_window_get_hadjustment(w->canvas_scroll_));
-      w->pan_vertical_start_ = gtk_adjustment_get_value(
-          gtk_scrolled_window_get_vadjustment(w->canvas_scroll_));
-      return;
-    }
+    w->drag_active_ = false;
+    w->annotation_drag_id_ = 0;
+    w->annotation_drag_page_ = w->current_page_;
+    w->annotation_origin_page_ = w->current_page_;
     if (w->pointer_mode_ == PointerMode::Select && !w->crop_mode_) {
       // The resize handle is centered on the bottom-right edge, so half of it
       // deliberately lies outside the annotation's normal hit rectangle.
@@ -718,6 +813,10 @@ void Window::build_ui() {
         if (std::abs(w->drag_start_.x - (b.x + b.width)) <= handle_tolerance &&
             std::abs(w->drag_start_.y - (b.y + b.height)) <= handle_tolerance) {
           w->annotation_edit_origin_ = *selected;
+          w->annotation_drag_page_ = w->current_page_;
+          w->annotation_origin_page_ = w->current_page_;
+          w->annotation_drag_id_ = selected->id;
+          w->drag_active_ = true;
           w->resizing_annotation_ = true;
           w->annotation_edit_started_ = false;
           return;
@@ -726,80 +825,89 @@ void Window::build_ui() {
       w->select_annotation_at(w->drag_start_);
       if (auto* annotation = w->selected_annotation()) {
         w->annotation_edit_origin_ = *annotation;
+        w->annotation_drag_page_ = w->current_page_;
+        w->annotation_origin_page_ = w->current_page_;
+        w->annotation_drag_id_ = annotation->id;
+        w->drag_active_ = true;
       }
       w->annotation_edit_started_ = false;
       return;
     }
     if (!w->tool_active_ && !w->crop_mode_) return;
+    w->drag_active_ = true;
     w->ink_points_.clear();
     w->ink_points_.push_back(w->drag_start_);
   })), this);
   g_signal_connect(drag, "drag-update", G_CALLBACK((+[](
       GtkGestureDrag*, double dx, double dy, gpointer data) {
     auto* w = self(data);
-    if (w->pointer_mode_ == PointerMode::Hand && !w->crop_mode_) {
-      gtk_adjustment_set_value(gtk_scrolled_window_get_hadjustment(w->canvas_scroll_),
-                               w->pan_horizontal_start_ - dx);
-      gtk_adjustment_set_value(gtk_scrolled_window_get_vadjustment(w->canvas_scroll_),
-                               w->pan_vertical_start_ - dy);
-      return;
-    }
     if (w->pointer_mode_ == PointerMode::Select && !w->crop_mode_) {
-      auto* annotation = w->selected_annotation();
-      if (!annotation || (std::abs(dx) < 2 && std::abs(dy) < 2)) return;
+      auto* annotation = w->annotation_at(w->annotation_drag_page_, w->annotation_drag_id_);
+      if (!annotation || !w->annotation_drag_id_ ||
+          (std::abs(dx) < 2 && std::abs(dy) < 2))
+        return;
       if (!w->annotation_edit_started_) {
         w->document_->begin_annotation_edit();
         w->annotation_edit_started_ = true;
       }
-      *annotation = w->annotation_edit_origin_;
-      const double px = dx / w->zoom_;
-      const double py = dy / w->zoom_;
-      if (w->resizing_annotation_) {
-        const Rect old = w->annotation_edit_origin_.bounds;
-        annotation->bounds.width = std::max(6.0, old.width + px);
-        annotation->bounds.height = std::max(6.0, old.height + py);
-        const double sx = old.width > 0 ? annotation->bounds.width / old.width : 1.0;
-        const double sy = old.height > 0 ? annotation->bounds.height / old.height : 1.0;
-        for (auto& point : annotation->points) {
-          point.x = old.x + (point.x - old.x) * sx;
-          point.y = old.y + (point.y - old.y) * sy;
+      std::size_t target_page = w->annotation_origin_page_;
+      if (w->continuous_scroll_ && !w->resizing_annotation_)
+        target_page = w->page_at_canvas_y(w->drag_origin_canvas_.y + dy);
+      double x_shift = 0.0;
+      double y_shift = 0.0;
+      if (target_page != w->annotation_origin_page_) {
+        const double canvas_width = gtk_widget_get_width(GTK_WIDGET(w->canvas_));
+        const double source_offset = std::max(0.0,
+            (canvas_width -
+             w->document_->page(w->annotation_origin_page_).width_points * w->zoom_) / 2.0);
+        const double target_offset = std::max(0.0,
+            (canvas_width -
+             w->document_->page(target_page).width_points * w->zoom_) / 2.0);
+        x_shift = (source_offset - target_offset) / w->zoom_;
+        y_shift = (w->page_top(w->annotation_origin_page_) -
+                   w->page_top(target_page)) / w->zoom_;
+      }
+      Annotation updated = w->annotation_edit_origin_;
+      w->move_dragged_annotation(updated, dx, dy, x_shift, y_shift);
+      if (target_page != w->annotation_drag_page_) {
+        if (w->document_->move_annotation(w->annotation_drag_page_,
+                                          w->annotation_drag_id_, target_page, updated)) {
+          w->annotation_drag_page_ = target_page;
+          w->show_current_page(target_page);
         }
       } else {
-        annotation->bounds.x += px;
-        annotation->bounds.y += py;
-        for (auto& point : annotation->points) {
-          point.x += px;
-          point.y += py;
-        }
+        *annotation = updated;
       }
       w->document_->invalidate_rendering();
       gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
       return;
     }
-    if (w->tool_active_ && w->active_tool_ == AnnotationType::Ink)
-      w->ink_points_.push_back({w->drag_start_.x + dx / w->zoom_,
-                                w->drag_start_.y + dy / w->zoom_});
-    if (w->tool_active_ && w->active_tool_ == AnnotationType::TextBox) {
-      w->drag_current_ = {w->drag_start_.x + dx / w->zoom_,
-                          w->drag_start_.y + dy / w->zoom_};
-      gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
-    }
+    if (!w->tool_active_ && !w->crop_mode_) return;
+    w->drag_current_ = {w->drag_start_.x + dx / w->zoom_,
+                        w->drag_start_.y + dy / w->zoom_};
+    if (!w->crop_mode_ && w->active_tool_ == AnnotationType::Ink)
+      w->ink_points_.push_back(w->drag_current_);
+    gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
   })), this);
   g_signal_connect(drag, "drag-end", G_CALLBACK((+[](
       GtkGestureDrag*, double dx, double dy, gpointer data) {
     auto* w = self(data);
-    if (w->pointer_mode_ == PointerMode::Hand && !w->crop_mode_) return;
     if (w->pointer_mode_ == PointerMode::Select && !w->crop_mode_) {
       if (w->annotation_edit_started_) {
         w->document_->commit_annotation_edit();
         w->annotation_edit_started_ = false;
         w->update_title();
       }
+      if (w->annotation_drag_page_ != w->current_page_)
+        w->show_current_page(w->annotation_drag_page_);
+      w->annotation_drag_id_ = 0;
+      w->drag_active_ = false;
       w->sync_annotation_controls();
       gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
       return;
     }
     w->drag_active_ = false;
+    w->drag_is_text_ = false;
     gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
     w->finish_canvas_drag((w->drag_start_.x * w->zoom_ + dx),
                           (w->drag_start_.y * w->zoom_ + dy));
@@ -1126,9 +1234,14 @@ void Window::update_page_status() {
     gtk_label_set_text(page_label_, "No document");
     return;
   }
-  const std::string status = "Page " + std::to_string(current_page_ + 1) + " of " +
-      std::to_string(document_->page_count()) + "  •  " +
-      std::to_string(static_cast<int>(zoom_ * 100)) + "%";
+  const std::string zoom = std::to_string(static_cast<int>(zoom_ * 100)) + "%";
+  GList* rows = sidebar_ ? gtk_list_box_get_selected_rows(sidebar_) : nullptr;
+  const int selected = g_list_length(rows);
+  g_list_free(rows);
+  const std::string status = selected > 1 ?
+      std::to_string(selected) + " pages selected  •  " + zoom :
+      "Page " + std::to_string(current_page_ + 1) + " of " +
+          std::to_string(document_->page_count()) + "  •  " + zoom;
   gtk_label_set_text(page_label_, status.c_str());
 }
 
@@ -1187,24 +1300,38 @@ void Window::render_current() {
   schedule_preload_next_page();
 }
 
-void Window::set_current_page(std::size_t page) {
-  if (!document_ || page >= document_->page_count() || page == current_page_) return;
+void Window::sync_sidebar_selection(std::size_t page) {
+  if (!sidebar_) return;
+  GList* rows = gtk_list_box_get_selected_rows(sidebar_);
+  const bool multi = rows && rows->next;
+  g_list_free(rows);
+  if (multi) return;
+  syncing_sidebar_ = true;
+  gtk_list_box_unselect_all(sidebar_);
+  if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
+    gtk_list_box_select_row(sidebar_, row);
+  syncing_sidebar_ = false;
+}
+
+void Window::show_current_page(std::size_t page) {
+  if (!document_ || page >= document_->page_count()) return;
   current_page_ = page;
-  selected_annotation_id_ = 0;
-  if (sidebar_) {
-    syncing_sidebar_ = true;
-    gtk_list_box_unselect_all(sidebar_);
-    if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
-      gtk_list_box_select_row(sidebar_, row);
-    syncing_sidebar_ = false;
-  }
+  sync_sidebar_selection(page);
   update_page_status();
   gtk_widget_queue_draw(GTK_WIDGET(canvas_));
   schedule_preload_next_page();
 }
 
+void Window::set_current_page(std::size_t page) {
+  if (!document_ || page >= document_->page_count() || page == current_page_) return;
+  if (selected_annotation_id_ && !annotation_at(page, selected_annotation_id_))
+    selected_annotation_id_ = 0;
+  show_current_page(page);
+}
+
 void Window::update_current_page_from_scroll() {
   if (!continuous_scroll_ || !document_ || !canvas_scroll_) return;
+  if (drag_active_ && pointer_mode_ == PointerMode::Select) return;
   auto* adjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
   const double top = gtk_adjustment_get_value(adjustment);
   const double page_size = gtk_adjustment_get_page_size(adjustment);
@@ -1361,6 +1488,135 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     cairo_restore(cr);
   };
 
+  auto draw_tool_preview = [&](double offset_x, double offset_y) {
+    if (!w->drag_active_ || w->pointer_mode_ != PointerMode::Annotate ||
+        !w->tool_active_ || w->crop_mode_)
+      return;
+    const auto type = w->active_tool_;
+    if (type == AnnotationType::TextBox) return;
+    Rect bounds{std::min(w->drag_start_.x, w->drag_current_.x),
+                std::min(w->drag_start_.y, w->drag_current_.y),
+                std::abs(w->drag_current_.x - w->drag_start_.x),
+                std::abs(w->drag_current_.y - w->drag_start_.y)};
+    if ((type == AnnotationType::Rectangle || type == AnnotationType::Ellipse ||
+         type == AnnotationType::Highlight) &&
+        (bounds.width < 0.5 || bounds.height < 0.5))
+      return;
+    cairo_save(cr);
+    cairo_translate(cr, offset_x, offset_y);
+    cairo_scale(cr, w->zoom_, w->zoom_);
+    cairo_set_line_width(cr, 2.0);
+    const auto& stroke = w->annotation_stroke_;
+    const auto& fill = w->annotation_fill_;
+    switch (type) {
+      case AnnotationType::Highlight: {
+        cairo_set_source_rgba(cr, fill.red, fill.green, fill.blue, fill.alpha);
+        const auto rects = w->document_->highlight_rects(w->current_page_, bounds);
+        for (const auto& rect : rects) {
+          cairo_rectangle(cr, rect.x, rect.y, rect.width, rect.height);
+          cairo_fill(cr);
+        }
+        break;
+      }
+      case AnnotationType::Rectangle:
+      case AnnotationType::Ellipse: {
+        if (type == AnnotationType::Rectangle) {
+          cairo_rectangle(cr, bounds.x, bounds.y, bounds.width, bounds.height);
+        } else {
+          cairo_save(cr);
+          cairo_translate(cr, bounds.x + bounds.width / 2.0,
+                          bounds.y + bounds.height / 2.0);
+          cairo_scale(cr, bounds.width / 2.0, bounds.height / 2.0);
+          cairo_arc(cr, 0, 0, 1, 0, 2 * G_PI);
+          cairo_restore(cr);
+        }
+        cairo_set_source_rgba(cr, fill.red, fill.green, fill.blue, fill.alpha);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, stroke.red, stroke.green, stroke.blue, stroke.alpha);
+        cairo_set_line_width(cr, 2.0);
+        cairo_stroke(cr);
+        break;
+      }
+      case AnnotationType::Line:
+      case AnnotationType::Arrow: {
+        const Point p1 = w->drag_start_;
+        const Point p2 = w->drag_current_;
+        cairo_set_source_rgba(cr, stroke.red, stroke.green, stroke.blue, stroke.alpha);
+        cairo_move_to(cr, p1.x, p1.y);
+        cairo_line_to(cr, p2.x, p2.y);
+        if (type == AnnotationType::Arrow) {
+          const double angle = std::atan2(p2.y - p1.y, p2.x - p1.x);
+          const double head = 10.0;
+          cairo_move_to(cr, p2.x, p2.y);
+          cairo_line_to(cr, p2.x - head * std::cos(angle - 0.45),
+                        p2.y - head * std::sin(angle - 0.45));
+          cairo_move_to(cr, p2.x, p2.y);
+          cairo_line_to(cr, p2.x - head * std::cos(angle + 0.45),
+                        p2.y - head * std::sin(angle + 0.45));
+        }
+        cairo_stroke(cr);
+        break;
+      }
+      case AnnotationType::Ink: {
+        if (w->ink_points_.empty()) break;
+        cairo_set_source_rgba(cr, stroke.red, stroke.green, stroke.blue, stroke.alpha);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+        cairo_move_to(cr, w->ink_points_.front().x, w->ink_points_.front().y);
+        for (std::size_t i = 1; i < w->ink_points_.size(); ++i)
+          cairo_line_to(cr, w->ink_points_[i].x, w->ink_points_[i].y);
+        cairo_stroke(cr);
+        break;
+      }
+      default:
+        break;
+    }
+    cairo_restore(cr);
+  };
+
+  auto draw_crop_guides = [&](double offset_x, double offset_y) {
+    if (!w->crop_mode_ || !w->document_ ||
+        w->current_page_ >= w->document_->page_count())
+      return;
+    const auto& page = w->document_->page(w->current_page_);
+    const double page_width = page.width_points;
+    const double page_height = page.height_points;
+    cairo_save(cr);
+    cairo_translate(cr, offset_x, offset_y);
+    cairo_scale(cr, w->zoom_, w->zoom_);
+    if (!w->drag_active_) {
+      cairo_set_source_rgba(cr, 0.20, 0.52, 0.95, 0.85);
+      cairo_set_line_width(cr, 1.5 / w->zoom_);
+      const double dash[] = {6.0 / w->zoom_, 4.0 / w->zoom_};
+      cairo_set_dash(cr, dash, 2, 0);
+      cairo_rectangle(cr, 1.0 / w->zoom_, 1.0 / w->zoom_,
+                      page_width - 2.0 / w->zoom_, page_height - 2.0 / w->zoom_);
+      cairo_stroke(cr);
+    } else {
+      Rect selection{
+        std::min(w->drag_start_.x, w->drag_current_.x),
+        std::min(w->drag_start_.y, w->drag_current_.y),
+        std::abs(w->drag_current_.x - w->drag_start_.x),
+        std::abs(w->drag_current_.y - w->drag_start_.y)};
+      selection.x = std::clamp(selection.x, 0.0, page_width);
+      selection.y = std::clamp(selection.y, 0.0, page_height);
+      selection.width = std::min(selection.width, page_width - selection.x);
+      selection.height = std::min(selection.height, page_height - selection.y);
+      cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.38);
+      cairo_rectangle(cr, 0, 0, page_width, page_height);
+      cairo_rectangle(cr, selection.x, selection.y, selection.width, selection.height);
+      cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
+      cairo_fill(cr);
+      cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+      cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95);
+      cairo_set_line_width(cr, 1.5 / w->zoom_);
+      cairo_rectangle(cr, selection.x, selection.y, selection.width, selection.height);
+      cairo_stroke(cr);
+    }
+    cairo_restore(cr);
+  };
+
+
   if (!w->continuous_scroll_) {
     const std::uint64_t skip = w->inline_edit_active_ ? w->inline_edit_id_ : 0;
     cairo_surface_t* surface = w->cached_page(w->current_page_, skip);
@@ -1373,6 +1629,8 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     cairo_paint(cr);
     draw_selection(x, y);
     draw_edit_bounds(x, y);
+    draw_tool_preview(x, y);
+    draw_crop_guides(x, y);
     draw_text_drag();
     return;
   }
@@ -1404,6 +1662,8 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
       0.0, (width - current.width_points * w->zoom_) / 2.0);
   draw_selection(current_x, w->page_top(w->current_page_));
   draw_edit_bounds(current_x, w->page_top(w->current_page_));
+  draw_tool_preview(current_x, w->page_top(w->current_page_));
+  draw_crop_guides(current_x, w->page_top(w->current_page_));
   draw_text_drag();
 }
 
@@ -1431,24 +1691,28 @@ Point Window::canvas_to_page(double x, double y) const {
   return {(x - offset_x) / zoom_, (y - offset_y) / zoom_};
 }
 
-Annotation* Window::selected_annotation() {
-  if (!document_ || !selected_annotation_id_ || current_page_ >= document_->page_count())
-    return nullptr;
-  auto& annotations = document_->page(current_page_).annotations;
-  const auto found = std::find_if(annotations.begin(), annotations.end(), [this](const Annotation& a) {
-    return a.id == selected_annotation_id_;
-  });
+Annotation* Window::annotation_at(std::size_t page, std::uint64_t id) {
+  if (!document_ || !id || page >= document_->page_count()) return nullptr;
+  auto& annotations = document_->page(page).annotations;
+  const auto found = std::find_if(annotations.begin(), annotations.end(),
+                                  [id](const Annotation& a) { return a.id == id; });
   return found == annotations.end() ? nullptr : &*found;
 }
 
-const Annotation* Window::selected_annotation() const {
-  if (!document_ || !selected_annotation_id_ || current_page_ >= document_->page_count())
-    return nullptr;
-  const auto& annotations = document_->page(current_page_).annotations;
-  const auto found = std::find_if(annotations.begin(), annotations.end(), [this](const Annotation& a) {
-    return a.id == selected_annotation_id_;
-  });
+const Annotation* Window::annotation_at(std::size_t page, std::uint64_t id) const {
+  if (!document_ || !id || page >= document_->page_count()) return nullptr;
+  const auto& annotations = document_->page(page).annotations;
+  const auto found = std::find_if(annotations.begin(), annotations.end(),
+                                  [id](const Annotation& a) { return a.id == id; });
   return found == annotations.end() ? nullptr : &*found;
+}
+
+Annotation* Window::selected_annotation() {
+  return annotation_at(current_page_, selected_annotation_id_);
+}
+
+const Annotation* Window::selected_annotation() const {
+  return annotation_at(current_page_, selected_annotation_id_);
 }
 
 void Window::select_annotation_at(Point point) {
@@ -1470,7 +1734,15 @@ void Window::select_annotation_at(Point point) {
 
 void Window::sync_annotation_controls() {
   const auto* annotation = selected_annotation();
-  if (!annotation) return;
+  if (!annotation) {
+    update_text_format_visibility();
+    return;
+  }
+  auto& tool_colors = tool_colors_[tool_color_index(annotation->type)];
+  tool_colors.stroke = annotation->stroke;
+  tool_colors.fill = annotation->fill;
+  annotation_stroke_ = annotation->stroke;
+  annotation_fill_ = annotation->fill;
   updating_annotation_controls_ = true;
   GdkRGBA stroke{annotation->stroke.red, annotation->stroke.green,
                  annotation->stroke.blue, annotation->stroke.alpha};
@@ -1479,6 +1751,7 @@ void Window::sync_annotation_controls() {
   gtk_color_dialog_button_set_rgba(stroke_color_, &stroke);
   gtk_color_dialog_button_set_rgba(fill_color_, &fill);
   updating_annotation_controls_ = false;
+  update_text_format_visibility();
 }
 
 void Window::apply_annotation_controls(bool text_and_font) {
@@ -1495,6 +1768,11 @@ void Window::apply_annotation_controls(bool text_and_font) {
     annotation_align_ = TextAlign::Right;
   else
     annotation_align_ = TextAlign::Left;
+  AnnotationType color_type = active_tool_;
+  if (inline_edit_active_) color_type = AnnotationType::TextBox;
+  else if (const auto* selected = selected_annotation()) color_type = selected->type;
+  tool_colors_[tool_color_index(color_type)].stroke = annotation_stroke_;
+  tool_colors_[tool_color_index(color_type)].fill = annotation_fill_;
   save_preferences();
   if (inline_edit_active_) {
     apply_inline_annotation_controls(text_and_font);
@@ -2152,20 +2430,40 @@ void Window::set_tool(AnnotationType type) {
   if (!document_ || document_->read_only()) { toast("This document is view-only"); return; }
   pointer_mode_ = PointerMode::Annotate;
   active_tool_ = type;
+  apply_tool_colors(type);
   tool_active_ = true;
   crop_mode_ = false;
   selected_annotation_id_ = 0;
   update_text_format_visibility();
   if (canvas_) gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "crosshair");
-  toast(type == AnnotationType::TextBox ? "Click or drag to place the text box"
-                                        : "Drag on the page to place the annotation");
+  toast(type == AnnotationType::TextBox ? "Click or drag to place the text box" :
+        type == AnnotationType::Highlight ? "Drag across text to highlight it" :
+        "Drag on the page to place the annotation");
 }
 
 void Window::update_text_format_visibility() {
   if (!text_format_box_) return;
-  const bool visible = inline_edit_active_ ||
-                       (tool_active_ && active_tool_ == AnnotationType::TextBox);
-  gtk_widget_set_visible(GTK_WIDGET(text_format_box_), visible);
+  const bool inline_text = inline_edit_active_;
+  const bool tool_text = tool_active_ && active_tool_ == AnnotationType::TextBox;
+  const bool show_text = inline_text || tool_text;
+  bool show_stroke = false;
+  bool show_fill = false;
+  if (inline_text) {
+    show_stroke = true;
+  } else if (tool_active_ && !crop_mode_) {
+    show_stroke = tool_uses_stroke(active_tool_);
+    show_fill = tool_uses_fill(active_tool_);
+  } else if (const auto* selected = selected_annotation();
+             selected && pointer_mode_ == PointerMode::Select) {
+    show_stroke = tool_uses_stroke(selected->type);
+    show_fill = tool_uses_fill(selected->type);
+  }
+  if (stroke_control_) gtk_widget_set_visible(stroke_control_, show_stroke);
+  if (fill_control_) gtk_widget_set_visible(fill_control_, show_fill);
+  gtk_widget_set_visible(GTK_WIDGET(text_format_box_), show_text);
+  if (property_revealer_)
+    gtk_revealer_set_reveal_child(property_revealer_,
+                                  show_stroke || show_fill || show_text);
 }
 
 void Window::update_font_button_label() {
@@ -2207,26 +2505,47 @@ void Window::choose_font() {
       }, this);
 }
 
-void Window::set_hand_tool() {
-  pointer_mode_ = PointerMode::Hand;
-  tool_active_ = false;
-  crop_mode_ = false;
-  selected_annotation_id_ = 0;
-  update_text_format_visibility();
-  if (canvas_) {
-    gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "grab");
-    gtk_widget_queue_draw(GTK_WIDGET(canvas_));
-  }
-}
-
 void Window::set_select_tool() {
   pointer_mode_ = PointerMode::Select;
   tool_active_ = false;
   crop_mode_ = false;
   update_text_format_visibility();
   if (canvas_) gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "default");
-  toast("Click to select; double-click text to edit; drag to move or resize");
   if (canvas_) gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+}
+
+void Window::move_dragged_annotation(Annotation& annotation, double dx, double dy,
+                                     double x_shift, double y_shift) {
+  const double px = dx / zoom_ + x_shift;
+  const double py = dy / zoom_ + y_shift;
+  if (resizing_annotation_) {
+    const Rect old = annotation_edit_origin_.bounds;
+    annotation.bounds.width = std::max(6.0, old.width + px);
+    annotation.bounds.height = std::max(6.0, old.height + py);
+    const double sx = old.width > 0 ? annotation.bounds.width / old.width : 1.0;
+    const double sy = old.height > 0 ? annotation.bounds.height / old.height : 1.0;
+    for (auto& point : annotation.points) {
+      point.x = old.x + (point.x - old.x) * sx;
+      point.y = old.y + (point.y - old.y) * sy;
+    }
+    for (auto& rect : annotation.text_rects) {
+      rect.x = old.x + (rect.x - old.x) * sx;
+      rect.y = old.y + (rect.y - old.y) * sy;
+      rect.width *= sx;
+      rect.height *= sy;
+    }
+  } else {
+    annotation.bounds.x += px;
+    annotation.bounds.y += py;
+    for (auto& point : annotation.points) {
+      point.x += px;
+      point.y += py;
+    }
+    for (auto& rect : annotation.text_rects) {
+      rect.x += px;
+      rect.y += py;
+    }
+  }
 }
 
 void Window::finish_canvas_drag(double x, double y) {
@@ -2238,11 +2557,40 @@ void Window::finish_canvas_drag(double x, double y) {
     if (bounds.width < 3 || bounds.height < 3) return;
     document_->secure_crop(selected_pages(), bounds);
     crop_mode_ = false;
+    if (select_button_) gtk_toggle_button_set_active(select_button_, TRUE);
     refresh();
     toast("Secure crop applied; undo is available until closing");
     return;
   }
   if (!tool_active_) return;
+  if (active_tool_ == AnnotationType::Highlight) {
+    const auto rects = document_->highlight_rects(current_page_, bounds);
+    if (rects.empty()) {
+      toast("No text selected");
+      return;
+    }
+    Rect text_bounds = rects.front();
+    for (const auto& rect : rects) {
+      const double right = std::max(text_bounds.x + text_bounds.width,
+                                    rect.x + rect.width);
+      const double bottom = std::max(text_bounds.y + text_bounds.height,
+                                     rect.y + rect.height);
+      text_bounds.x = std::min(text_bounds.x, rect.x);
+      text_bounds.y = std::min(text_bounds.y, rect.y);
+      text_bounds.width = right - text_bounds.x;
+      text_bounds.height = bottom - text_bounds.y;
+    }
+    Annotation highlight;
+    highlight.type = AnnotationType::Highlight;
+    highlight.bounds = text_bounds;
+    highlight.text_rects = rects;
+    highlight.stroke = annotation_stroke_;
+    highlight.fill = annotation_fill_;
+    document_->add_annotation(current_page_, std::move(highlight));
+    render_current();
+    update_title();
+    return;
+  }
   const bool is_text = active_tool_ == AnnotationType::TextBox;
   if (bounds.width < 3 || bounds.height < 3) {
     if (!is_text) return;
@@ -2279,7 +2627,12 @@ void Window::start_destructive(bool crop) {
   if(crop){
     crop_mode_=true;
     tool_active_=false;
+    drag_active_=false;
+    selected_annotation_id_=0;
     if(active_tool_button_) gtk_toggle_button_set_active(active_tool_button_,FALSE);
+    update_text_format_visibility();
+    if(canvas_) gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_),"crosshair");
+    gtk_widget_queue_draw(GTK_WIDGET(canvas_));
     toast("Drag the area to keep; everything outside will be removed");
     return;
   }
