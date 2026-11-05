@@ -374,9 +374,9 @@ void Window::build_ui() {
   adw_toolbar_view_add_top_bar(toolbar_view, GTK_WIDGET(annotation_bar));
 
   split_ = ADW_OVERLAY_SPLIT_VIEW(adw_overlay_split_view_new());
-  adw_overlay_split_view_set_sidebar_width_fraction(split_, 0.22);
-  adw_overlay_split_view_set_min_sidebar_width(split_, 180);
-  adw_overlay_split_view_set_max_sidebar_width(split_, 320);
+  adw_overlay_split_view_set_sidebar_width_fraction(split_, 0.15);
+  adw_overlay_split_view_set_min_sidebar_width(split_, 160);
+  adw_overlay_split_view_set_max_sidebar_width(split_, 220);
   adw_toolbar_view_set_content(toolbar_view, GTK_WIDGET(split_));
 
   auto* sidebar_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
