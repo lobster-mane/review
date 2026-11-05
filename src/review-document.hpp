@@ -101,6 +101,12 @@ private:
   bool destructive_changes_{};
   bool read_only_{};
   std::uint64_t revision_{1};
+  struct TextLayoutCache {
+    std::size_t page{};
+    std::uint64_t revision{};
+    std::vector<Rect> rectangles;
+  };
+  mutable std::vector<TextLayoutCache> text_layout_cache_{};
   bool annotation_edit_open_{};
   std::uint64_t next_annotation_id_{1};
   std::filesystem::path session_dir_{};

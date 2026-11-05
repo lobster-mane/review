@@ -75,10 +75,19 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - The highlight tool is a text selector. `Document::highlight_rects()` maps the
   drag start/end points to continuous character ranges in Poppler's text
   layout, groups them into per-line rectangles, stores them in
-  `Annotation::text_rects`, and writes them as multiple highlight quads.
+  `Annotation::text_rects`, and writes them as multiple highlight quads. The
+  character layout is cached per page and invalidated by `revision()`; keep it
+  cached so live highlight previews stay smooth.
+- Pinch zoom is handled by a `GtkGestureZoom` on the canvas. It keeps the page
+  point under the gesture in place and switches off fit width. On a touchscreen,
+  a one-finger drag on empty canvas with the selection tool pans the scrolled
+  window instead of selecting.
 - Per-tool stroke/fill defaults live in `Window::tool_colors_`; the marker
   (highlight) defaults to translucent yellow and other tools to black with a
   transparent fill. Color controls are shown through `property_revealer_`.
+- Signatures are inserted at the center of the current view; compute the view
+  center with the canvas bounds rather than assuming the page is aligned with
+  the viewport.
 - Rendered page surfaces are cached in `Window`; `Document::revision()` and
   the zoom level invalidate the cache. Call `Document::invalidate_rendering()`
   for live annotation mutations (moves/resizes) so cached text follows the box.

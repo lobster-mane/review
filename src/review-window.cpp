@@ -546,16 +546,19 @@ void Window::build_ui() {
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(signature_scroll),
                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_max_content_height(
-      GTK_SCROLLED_WINDOW(signature_scroll), 420);
+      GTK_SCROLLED_WINDOW(signature_scroll), 300);
+  gtk_scrolled_window_set_max_content_width(
+      GTK_SCROLLED_WINDOW(signature_scroll), 200);
   gtk_scrolled_window_set_propagate_natural_height(
       GTK_SCROLLED_WINDOW(signature_scroll), TRUE);
   gtk_scrolled_window_set_propagate_natural_width(
-      GTK_SCROLLED_WINDOW(signature_scroll), TRUE);
-  signature_box_ = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 6));
-  gtk_widget_set_margin_start(GTK_WIDGET(signature_box_), 8);
-  gtk_widget_set_margin_end(GTK_WIDGET(signature_box_), 8);
-  gtk_widget_set_margin_top(GTK_WIDGET(signature_box_), 8);
-  gtk_widget_set_margin_bottom(GTK_WIDGET(signature_box_), 8);
+      GTK_SCROLLED_WINDOW(signature_scroll), FALSE);
+  gtk_widget_set_size_request(signature_scroll, 200, -1);
+  signature_box_ = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
+  gtk_widget_set_margin_start(GTK_WIDGET(signature_box_), 6);
+  gtk_widget_set_margin_end(GTK_WIDGET(signature_box_), 6);
+  gtk_widget_set_margin_top(GTK_WIDGET(signature_box_), 6);
+  gtk_widget_set_margin_bottom(GTK_WIDGET(signature_box_), 6);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(signature_scroll),
                                 GTK_WIDGET(signature_box_));
   gtk_popover_set_child(GTK_POPOVER(signature_popover), signature_scroll);
@@ -821,6 +824,9 @@ void Window::build_ui() {
       GtkGestureDrag* gesture, double x, double y, gpointer data) {
     auto* w = self(data);
     if (!w->document_) return;
+    GdkDevice* device = gtk_gesture_get_device(GTK_GESTURE(gesture));
+    const bool touch =
+        device && gdk_device_get_source(device) == GDK_SOURCE_TOUCHSCREEN;
     if (w->inline_edit_active_ &&
         g_get_monotonic_time() - w->inline_edit_started_at_ > 150000)
       w->finish_inline_text_edit(true);
@@ -831,6 +837,7 @@ void Window::build_ui() {
     w->drag_current_ = w->drag_start_;
     w->drag_is_text_ = w->tool_active_ && w->active_tool_ == AnnotationType::TextBox;
     w->drag_active_ = false;
+    w->touch_panning_ = false;
     w->annotation_drag_id_ = 0;
     w->annotation_drag_page_ = w->current_page_;
     w->annotation_origin_page_ = w->current_page_;
@@ -855,6 +862,15 @@ void Window::build_ui() {
         }
       }
       w->select_annotation_at(w->drag_start_);
+      if (touch && !w->selected_annotation()) {
+        w->touch_panning_ = true;
+        w->pan_horizontal_start_ = gtk_adjustment_get_value(
+            gtk_scrolled_window_get_hadjustment(w->canvas_scroll_));
+        w->pan_vertical_start_ = gtk_adjustment_get_value(
+            gtk_scrolled_window_get_vadjustment(w->canvas_scroll_));
+        w->annotation_edit_started_ = false;
+        return;
+      }
       if (auto* annotation = w->selected_annotation()) {
         w->annotation_edit_origin_ = *annotation;
         w->annotation_drag_page_ = w->current_page_;
@@ -873,6 +889,13 @@ void Window::build_ui() {
   g_signal_connect(drag, "drag-update", G_CALLBACK((+[](
       GtkGestureDrag*, double dx, double dy, gpointer data) {
     auto* w = self(data);
+    if (w->touch_panning_) {
+      gtk_adjustment_set_value(gtk_scrolled_window_get_hadjustment(w->canvas_scroll_),
+                               w->pan_horizontal_start_ - dx);
+      gtk_adjustment_set_value(gtk_scrolled_window_get_vadjustment(w->canvas_scroll_),
+                               w->pan_vertical_start_ - dy);
+      return;
+    }
     if (w->pointer_mode_ == PointerMode::Select && !w->crop_mode_) {
       auto* annotation = w->annotation_at(w->annotation_drag_page_, w->annotation_drag_id_);
       if (!annotation || !w->annotation_drag_id_ ||
@@ -924,6 +947,13 @@ void Window::build_ui() {
   g_signal_connect(drag, "drag-end", G_CALLBACK((+[](
       GtkGestureDrag*, double dx, double dy, gpointer data) {
     auto* w = self(data);
+    if (w->touch_panning_) {
+      w->touch_panning_ = false;
+      return;
+    }
+    if (!w->drag_active_ &&
+        (w->pointer_mode_ != PointerMode::Select || w->crop_mode_))
+      return;
     if (w->pointer_mode_ == PointerMode::Select && !w->crop_mode_) {
       if (w->annotation_edit_started_) {
         w->document_->commit_annotation_edit();
@@ -945,6 +975,97 @@ void Window::build_ui() {
                           (w->drag_start_.y * w->zoom_ + dy));
   })), this);
   gtk_widget_add_controller(GTK_WIDGET(canvas_), GTK_EVENT_CONTROLLER(drag));
+
+  auto* zoom_gesture = gtk_gesture_zoom_new();
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(zoom_gesture),
+                                              GTK_PHASE_CAPTURE);
+  g_signal_connect(zoom_gesture, "begin", G_CALLBACK(+[](
+      GtkGesture* gesture, GdkEventSequence*, gpointer data) {
+    auto* w = self(data);
+    if (!w->document_) return;
+    if (w->inline_edit_active_) w->finish_inline_text_edit(true);
+    auto* hadjustment = gtk_scrolled_window_get_hadjustment(w->canvas_scroll_);
+    auto* vadjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
+    double x = 0.0;
+    double y = 0.0;
+    bool have_center = false;
+    GdkRectangle box{};
+    if (gtk_gesture_get_bounding_box(gesture, &box)) {
+      x = box.x + box.width / 2.0;
+      y = box.y + box.height / 2.0;
+      have_center = true;
+    } else {
+      x = gtk_adjustment_get_value(hadjustment) +
+          gtk_adjustment_get_page_size(hadjustment) / 2.0;
+      y = gtk_adjustment_get_value(vadjustment) +
+          gtk_adjustment_get_page_size(vadjustment) / 2.0;
+    }
+    w->pinch_start_zoom_ = w->zoom_;
+    w->pinch_anchor_page_ = w->continuous_scroll_ ? w->page_at_canvas_y(y) :
+                                                     w->current_page_;
+    w->pinch_anchor_ = w->canvas_to_page(x, y);
+    graphene_rect_t canvas_bounds;
+    if (have_center && gtk_widget_compute_bounds(GTK_WIDGET(w->canvas_),
+                                                 GTK_WIDGET(w->canvas_scroll_),
+                                                 &canvas_bounds)) {
+      w->pinch_view_x_ = canvas_bounds.origin.x + x;
+      w->pinch_view_y_ = canvas_bounds.origin.y + y;
+    } else {
+      w->pinch_view_x_ = gtk_adjustment_get_page_size(hadjustment) / 2.0;
+      w->pinch_view_y_ = gtk_adjustment_get_page_size(vadjustment) / 2.0;
+    }
+    w->pinch_active_ = true;
+    w->touch_panning_ = false;
+    w->drag_active_ = false;
+    w->ink_points_.clear();
+  }), this);
+  g_signal_connect(zoom_gesture, "scale-changed", G_CALLBACK((+[](
+      GtkGestureZoom* gesture, double scale, gpointer data) {
+    auto* w = self(data);
+    if (!w->pinch_active_ || !w->document_) return;
+    const double next_zoom = std::clamp(w->pinch_start_zoom_ * scale, 0.15, 5.0);
+    if (std::abs(next_zoom - w->zoom_) < 0.0005) return;
+    w->fit_width_ = false;
+    w->zoom_ = next_zoom;
+    w->render_current();
+    struct PinchScroll {
+      Window* window;
+      std::size_t page;
+      Point anchor;
+      double view_x{};
+      double view_y{};
+    };
+    auto* request = new PinchScroll{w, w->pinch_anchor_page_, w->pinch_anchor_,
+                                    w->pinch_view_x_, w->pinch_view_y_};
+    gtk_widget_add_tick_callback(GTK_WIDGET(w->canvas_scroll_), +[](
+        GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
+      auto* request = static_cast<PinchScroll*>(data);
+      auto* window = request->window;
+      if (!window->document_) {
+        delete request;
+        return G_SOURCE_REMOVE;
+      }
+      const Point content = window->page_to_canvas(request->page, request->anchor);
+      auto* hadjustment = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget));
+      auto* vadjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget));
+      auto set_clamped = [](GtkAdjustment* adjustment, double value) {
+        const double lower = gtk_adjustment_get_lower(adjustment);
+        const double upper = std::max(lower, gtk_adjustment_get_upper(adjustment) -
+                                               gtk_adjustment_get_page_size(adjustment));
+        gtk_adjustment_set_value(adjustment, std::clamp(value, lower, upper));
+      };
+      set_clamped(hadjustment, content.x - request->view_x);
+      set_clamped(vadjustment, content.y - request->view_y);
+      delete request;
+      return G_SOURCE_REMOVE;
+    }, request, nullptr);
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  })), this);
+  g_signal_connect(zoom_gesture, "end", G_CALLBACK(+[](
+      GtkGesture*, GdkEventSequence*, gpointer data) {
+    self(data)->pinch_active_ = false;
+  }), this);
+  gtk_widget_add_controller(GTK_WIDGET(canvas_), GTK_EVENT_CONTROLLER(zoom_gesture));
 
   auto* double_click = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(double_click), GDK_BUTTON_PRIMARY);
@@ -1727,6 +1848,17 @@ Point Window::canvas_to_page(double x, double y) const {
   return {(x - offset_x) / zoom_, (y - offset_y) / zoom_};
 }
 
+Point Window::page_to_canvas(std::size_t page, Point local) const {
+  if (!document_ || page >= document_->page_count())
+    return {local.x * zoom_, local.y * zoom_};
+  const auto& ref = document_->page(page);
+  const double offset_x = std::max(0.0,
+      (gtk_widget_get_width(GTK_WIDGET(canvas_)) - ref.width_points * zoom_) / 2.0);
+  const double offset_y = continuous_scroll_ ? page_top(page) : std::max(0.0,
+      (gtk_widget_get_height(GTK_WIDGET(canvas_)) - ref.height_points * zoom_) / 2.0);
+  return {offset_x + local.x * zoom_, offset_y + local.y * zoom_};
+}
+
 Annotation* Window::annotation_at(std::size_t page, std::uint64_t id) {
   if (!document_ || !id || page >= document_->page_count()) return nullptr;
   auto& annotations = document_->page(page).annotations;
@@ -2412,11 +2544,12 @@ void Window::rebuild_signature_menu() {
     auto* picture = gtk_picture_new_for_filename(info.path.c_str());
     gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
     gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_CONTAIN);
-    gtk_widget_set_size_request(picture, 220, 64);
+    gtk_widget_set_size_request(picture, 160, 48);
     gtk_widget_add_css_class(picture, "signature-preview");
     gtk_box_append(content, picture);
     auto* label = gtk_label_new(info.name.c_str());
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_size_request(label, 160, -1);
     gtk_box_append(content, label);
     gtk_button_set_child(GTK_BUTTON(button), GTK_WIDGET(content));
     g_object_set_data_full(G_OBJECT(button), "signature-path",
@@ -2450,13 +2583,40 @@ void Window::insert_signature(const std::string& path) {
     return;
   }
   if (inline_edit_active_) finish_inline_text_edit(true);
-  const auto& page = document_->page(current_page_);
+  auto* hadjustment = gtk_scrolled_window_get_hadjustment(canvas_scroll_);
+  auto* vadjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
+  double view_x = gtk_adjustment_get_value(hadjustment) +
+                  gtk_adjustment_get_page_size(hadjustment) / 2.0;
+  double view_y = gtk_adjustment_get_value(vadjustment) +
+                  gtk_adjustment_get_page_size(vadjustment) / 2.0;
+  graphene_rect_t canvas_bounds;
+  if (gtk_widget_compute_bounds(GTK_WIDGET(canvas_), GTK_WIDGET(canvas_scroll_),
+                                &canvas_bounds)) {
+    view_x = gtk_adjustment_get_page_size(hadjustment) / 2.0 -
+             canvas_bounds.origin.x;
+    view_y = gtk_adjustment_get_page_size(vadjustment) / 2.0 -
+             canvas_bounds.origin.y;
+  }
+  std::size_t page_index = continuous_scroll_ ? page_at_canvas_y(view_y) :
+                                                current_page_;
+  if (page_index >= document_->page_count()) page_index = current_page_;
+  const auto& page = document_->page(page_index);
+  const Point page_origin = page_to_canvas(page_index, {0, 0});
+  const double center_x = std::clamp((view_x - page_origin.x) / zoom_,
+                                     0.0, page.width_points);
+  const double center_y = std::clamp((view_y - page_origin.y) / zoom_,
+                                     0.0, page.height_points);
+  const double width = page.width_points * .5;
+  const double height = page.height_points * .12;
   Annotation annotation;
   annotation.type = AnnotationType::Signature;
   annotation.signature_path = path;
-  annotation.bounds = {page.width_points * .25, page.height_points * .4,
-                       page.width_points * .5, page.height_points * .12};
-  document_->add_annotation(current_page_, std::move(annotation));
+  annotation.bounds = {
+    std::clamp(center_x - width / 2.0, 0.0, std::max(0.0, page.width_points - width)),
+    std::clamp(center_y - height / 2.0, 0.0, std::max(0.0, page.height_points - height)),
+    width, height};
+  document_->add_annotation(page_index, std::move(annotation));
+  if (page_index != current_page_) show_current_page(page_index);
   render_current();
   update_title();
 }

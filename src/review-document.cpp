@@ -600,91 +600,110 @@ std::vector<Rect> Document::highlight_rects(std::size_t index, Point start,
   const auto& ref = pages_[index];
   if (ref.rasterized || ref.secure_crop.active || ref.rotation != 0) return result;
 
-  std::string ignored;
-  PopplerDocument* source = (pdf_ && ref.source_path == path_) ?
-      static_cast<PopplerDocument*>(g_object_ref(pdf_)) : load_pdf(ref.source_path, ignored);
-  if (!source) return result;
-  PopplerPage* page = poppler_document_get_page(source, ref.source_index);
-  if (!page) {
-    g_object_unref(source);
-    return result;
-  }
+  if (!text_layout_cache_.empty() &&
+      text_layout_cache_.front().revision != revision_)
+    text_layout_cache_.clear();
 
-  PopplerRectangle* rectangles = nullptr;
-  guint count = 0;
-  if (poppler_page_get_text_layout(page, &rectangles, &count) && count > 0) {
-    auto nearest_index = [&](Point point) {
-      guint best = 0;
-      double best_score = std::numeric_limits<double>::max();
+  const std::vector<Rect>* characters = nullptr;
+  for (const auto& entry : text_layout_cache_) {
+    if (entry.page == index) {
+      characters = &entry.rectangles;
+      break;
+    }
+  }
+  if (!characters) {
+    std::string ignored;
+    PopplerDocument* source = (pdf_ && ref.source_path == path_) ?
+        static_cast<PopplerDocument*>(g_object_ref(pdf_)) : load_pdf(ref.source_path, ignored);
+    if (!source) return result;
+    PopplerPage* page = poppler_document_get_page(source, ref.source_index);
+    if (!page) {
+      g_object_unref(source);
+      return result;
+    }
+    std::vector<Rect> layout;
+    PopplerRectangle* rectangles = nullptr;
+    guint count = 0;
+    if (poppler_page_get_text_layout(page, &rectangles, &count)) {
+      layout.reserve(count);
       for (guint i = 0; i < count; ++i) {
         const auto& r = rectangles[i];
         const double left = std::min(r.x1, r.x2);
-        const double right = std::max(r.x1, r.x2);
         const double top = std::min(r.y1, r.y2);
-        const double bottom = std::max(r.y1, r.y2);
-        if (right <= left || bottom <= top) continue;
-        const double dx = point.x < left ? left - point.x :
-                          point.x > right ? point.x - right : 0.0;
-        const double dy = point.y < top ? top - point.y :
-                          point.y > bottom ? point.y - bottom : 0.0;
-        // Prefer the nearest text line, then the nearest character on it.
-        const double score = dy * 10000.0 + dx;
-        if (score < best_score) {
-          best_score = score;
-          best = i;
-        }
+        const double width = std::abs(r.x2 - r.x1);
+        const double height = std::abs(r.y2 - r.y1);
+        if (width > 0.0 && height > 0.0)
+          layout.push_back({left, top, width, height});
       }
-      return best;
-    };
-
-    guint first = nearest_index(start);
-    guint last = nearest_index(end);
-    if (first > last) std::swap(first, last);
-
-    struct Line {
-      double top{};
-      double bottom{};
-      double left{};
-      double right{};
-    };
-    std::vector<Line> lines;
-    for (guint i = first; i <= last; ++i) {
-      const auto& r = rectangles[i];
-      const double left = std::min(r.x1, r.x2);
-      const double right = std::max(r.x1, r.x2);
-      const double top = std::min(r.y1, r.y2);
-      const double bottom = std::max(r.y1, r.y2);
-      if (right <= left || bottom <= top) continue;
-      bool merged = false;
-      if (!lines.empty()) {
-        auto& line = lines.back();
-        const double line_height = line.bottom - line.top;
-        const double vertical_overlap = std::min(line.bottom, bottom) - std::max(line.top, top);
-        const double horizontal_distance =
-            right < line.left ? line.left - right :
-            left > line.right ? left - line.right : 0.0;
-        const double allowed_gap = std::max(12.0, std::max(line_height, bottom - top) * 2.0);
-        if (vertical_overlap > std::min(line_height, bottom - top) * 0.5 &&
-            horizontal_distance <= allowed_gap) {
-          line.top = std::min(line.top, top);
-          line.bottom = std::max(line.bottom, bottom);
-          line.left = std::min(line.left, left);
-          line.right = std::max(line.right, right);
-          merged = true;
-        }
-      }
-      if (!merged)
-        lines.push_back({top, bottom, left, right});
     }
-    for (const auto& line : lines) {
-      if (line.right > line.left && line.bottom > line.top)
-        result.push_back({line.left, line.top, line.right - line.left,
-                          line.bottom - line.top});
-    }
+    g_free(rectangles);
+    g_object_unref(page);
+    g_object_unref(source);
+    if (text_layout_cache_.size() >= 4) text_layout_cache_.erase(text_layout_cache_.begin());
+    text_layout_cache_.push_back({index, revision_, std::move(layout)});
+    characters = &text_layout_cache_.back().rectangles;
   }
-  g_free(rectangles);
-  g_object_unref(page);
-  g_object_unref(source);
+  if (characters->empty()) return result;
+
+  auto nearest_index = [&](Point point) {
+    std::size_t best = 0;
+    double best_score = std::numeric_limits<double>::max();
+    for (std::size_t i = 0; i < characters->size(); ++i) {
+      const auto& r = (*characters)[i];
+      const double dx = point.x < r.x ? r.x - point.x :
+                        point.x > r.x + r.width ? point.x - (r.x + r.width) : 0.0;
+      const double dy = point.y < r.y ? r.y - point.y :
+                        point.y > r.y + r.height ? point.y - (r.y + r.height) : 0.0;
+      // Prefer the nearest text line, then the nearest character on it.
+      const double score = dy * 10000.0 + dx;
+      if (score < best_score) {
+        best_score = score;
+        best = i;
+      }
+    }
+    return best;
+  };
+
+  std::size_t first = nearest_index(start);
+  std::size_t last = nearest_index(end);
+  if (first > last) std::swap(first, last);
+
+  struct Line {
+    double top{};
+    double bottom{};
+    double left{};
+    double right{};
+  };
+  std::vector<Line> lines;
+  for (std::size_t i = first; i <= last; ++i) {
+    const auto& r = (*characters)[i];
+    bool merged = false;
+    if (!lines.empty()) {
+      auto& line = lines.back();
+      const double line_height = line.bottom - line.top;
+      const double vertical_overlap = std::min(line.bottom, r.y + r.height) -
+                                     std::max(line.top, r.y);
+      const double horizontal_distance =
+          r.x + r.width < line.left ? line.left - (r.x + r.width) :
+          r.x > line.right ? r.x - line.right : 0.0;
+      const double allowed_gap = std::max(12.0, std::max(line_height, r.height) * 2.0);
+      if (vertical_overlap > std::min(line_height, r.height) * 0.5 &&
+          horizontal_distance <= allowed_gap) {
+        line.top = std::min(line.top, r.y);
+        line.bottom = std::max(line.bottom, r.y + r.height);
+        line.left = std::min(line.left, r.x);
+        line.right = std::max(line.right, r.x + r.width);
+        merged = true;
+      }
+    }
+    if (!merged)
+      lines.push_back({r.y, r.y + r.height, r.x, r.x + r.width});
+  }
+  for (const auto& line : lines) {
+    if (line.right > line.left && line.bottom > line.top)
+      result.push_back({line.left, line.top, line.right - line.left,
+                        line.bottom - line.top});
+  }
   return result;
 }
 

@@ -60,8 +60,9 @@ Choose **View → Continuous Scroll** (`Ctrl+1`) for a long scrolling view, or
 **View → Single Page** (`Ctrl+2`) for one page at a time. In single-page mode,
 scroll down at the bottom of a page to open the next page, or up at the top to
 open the previous one. The next page is preloaded to make page turns faster.
-The sidebar selection and page counter follow the visible page. Review
-remembers the last view mode for new windows.
+Pinch on a touchpad or touchscreen to zoom, and drag with one finger on the
+document to pan on a touchscreen. The sidebar selection and page counter follow
+the visible page. Review remembers the last view mode for new windows.
 
 ## Signatures
 
@@ -70,9 +71,9 @@ Draw a signature once with **Draw Signature…**, or import an image with
 images; dark ink on clean, evenly lit white paper works best.
 
 Select the signature button in the annotation toolbar to open a menu of saved
-signatures with previews. Choose one to place it, then use the selection tool to
-move or resize it. Use the **+** button below the previews to draw another
-signature.
+signatures with previews. Choose one to place it at the center of the current
+view, then use the selection tool to move or resize it. Use the **+** button
+below the previews to draw another signature.
 
 Signatures are stored per user under `$XDG_DATA_HOME/review/signatures`, normally
 `~/.local/share/review/signatures`. Review restricts these files to the owner but

@@ -90,6 +90,7 @@ private:
   [[nodiscard]] std::vector<TextSpan> inline_text_spans() const;
   GtkTextTag* create_inline_format_tag(const TextStyle& style);
   Point canvas_to_page(double x, double y) const;
+  Point page_to_canvas(std::size_t page, Point local) const;
   void finish_canvas_drag(double x, double y);
 
   static void draw_page(GtkDrawingArea* area, cairo_t* cr, int width, int height,
@@ -182,6 +183,15 @@ private:
   Point drag_origin_canvas_{};
   bool drag_active_{};
   bool drag_is_text_{};
+  bool touch_panning_{};
+  double pan_horizontal_start_{};
+  double pan_vertical_start_{};
+  double pinch_start_zoom_{1.0};
+  double pinch_view_x_{};
+  double pinch_view_y_{};
+  Point pinch_anchor_{};
+  std::size_t pinch_anchor_page_{};
+  bool pinch_active_{};
   std::size_t annotation_drag_page_{};
   std::size_t annotation_origin_page_{};
   std::uint64_t annotation_drag_id_{};
