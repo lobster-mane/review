@@ -97,6 +97,8 @@ private:
   bool continuous_scroll_{false};
   bool syncing_sidebar_{false};
   int sidebar_position_{180};
+  double last_scroll_value_{};
+  bool has_last_scroll_value_{};
   bool warned_destructive_{};
   bool tool_active_{};
   bool crop_mode_{};

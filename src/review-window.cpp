@@ -1063,18 +1063,23 @@ void Window::update_current_page_from_scroll() {
   if (!continuous_scroll_ || !document_ || !canvas_scroll_) return;
   auto* adjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
   const double top = gtk_adjustment_get_value(adjustment);
+  const double page_size = gtk_adjustment_get_page_size(adjustment);
   const double lower = gtk_adjustment_get_lower(adjustment);
-  const double maximum = gtk_adjustment_get_upper(adjustment) -
-                         gtk_adjustment_get_page_size(adjustment);
+  const double maximum = gtk_adjustment_get_upper(adjustment) - page_size;
+  const bool downward = !has_last_scroll_value_ || top >= last_scroll_value_;
+  last_scroll_value_ = top;
+  has_last_scroll_value_ = true;
+
   if (top <= lower + 0.5) {
     set_current_page(0);
   } else if (maximum > 0.0 && top >= maximum - 0.5) {
     set_current_page(document_->page_count() - 1);
   } else {
-    // Advance as soon as the next page occupies most of the viewport, rather
-    // than waiting for the previous page to leave it completely.
+    // When scrolling down, advance as soon as the next page's top edge enters
+    // the viewport. When scrolling up, switch as soon as the previous page's
+    // bottom edge does.
     set_current_page(page_at_canvas_y(
-        top + gtk_adjustment_get_page_size(adjustment) / 2.0));
+        downward ? top + page_size - 1.0 : top + 1.0));
   }
 }
 
