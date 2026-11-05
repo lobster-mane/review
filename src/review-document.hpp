@@ -34,6 +34,7 @@ public:
   [[nodiscard]] bool dirty() const { return dirty_; }
   [[nodiscard]] bool destructive_changes() const { return destructive_changes_; }
   [[nodiscard]] bool read_only() const { return read_only_; }
+  [[nodiscard]] std::uint64_t revision() const { return revision_; }
 
   cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true,
                                std::uint64_t skip_annotation_id = 0) const;
@@ -94,6 +95,7 @@ private:
   bool dirty_{};
   bool destructive_changes_{};
   bool read_only_{};
+  std::uint64_t revision_{1};
   bool annotation_edit_open_{};
   std::uint64_t next_annotation_id_{1};
   std::filesystem::path session_dir_{};

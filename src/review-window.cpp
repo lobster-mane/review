@@ -19,6 +19,7 @@ namespace {
 
 constexpr double kPageGap = 12.0;
 constexpr double kCanvasMargin = 24.0;
+constexpr std::size_t kPageCacheLimit = 6;
 
 std::vector<PageRef> page_clipboard;
 bool clipboard_is_cut = false;
@@ -99,7 +100,41 @@ Window::Window(AdwApplication* application) {
 }
 
 Window::~Window() {
+  clear_page_cache();
   if (recent_menu_) g_object_unref(recent_menu_);
+}
+
+void Window::clear_page_cache() {
+  for (auto& entry : page_cache_) cairo_surface_destroy(entry.surface);
+  page_cache_.clear();
+  page_cache_revision_ = 0;
+  page_cache_zoom_ = 0.0;
+}
+
+cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip) {
+  if (!document_ || page >= document_->page_count()) return nullptr;
+  if (page_cache_revision_ != document_->revision() ||
+      page_cache_zoom_ != zoom_) {
+    clear_page_cache();
+  }
+  for (auto it = page_cache_.begin(); it != page_cache_.end(); ++it) {
+    if (it->page == page && it->skip == skip) {
+      CachedPage entry = *it;
+      page_cache_.erase(it);
+      page_cache_.push_back(entry);
+      return entry.surface;
+    }
+  }
+  cairo_surface_t* surface = document_->render_page(page, zoom_, true, skip);
+  if (!surface) return nullptr;
+  if (page_cache_.size() >= kPageCacheLimit) {
+    cairo_surface_destroy(page_cache_.front().surface);
+    page_cache_.erase(page_cache_.begin());
+  }
+  page_cache_.push_back({page, skip, surface});
+  page_cache_revision_ = document_->revision();
+  page_cache_zoom_ = zoom_;
+  return surface;
 }
 
 void Window::present() {
@@ -309,6 +344,7 @@ void Window::build_ui() {
       } else if (w->active_tool_button_ == button) {
         w->active_tool_button_ = nullptr;
         w->tool_active_ = false;
+        w->update_text_format_visibility();
       }
     }), this);
     append_button(tool_row, GTK_WIDGET(button));
@@ -353,30 +389,30 @@ void Window::build_ui() {
   append_button(property_row, fill_label);
   append_button(property_row, GTK_WIDGET(fill_color_));
 
-  auto* font_dialog = gtk_font_dialog_new();
-  gtk_font_dialog_set_title(font_dialog, "Choose annotation font");
-  font_button_ = GTK_FONT_DIALOG_BUTTON(gtk_font_dialog_button_new(font_dialog));
-  auto* initial_font = pango_font_description_from_string("Sans 12");
-  gtk_font_dialog_button_set_font_desc(font_button_, initial_font);
-  pango_font_description_free(initial_font);
+  text_format_box_ = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8));
+  append_button(property_row, GTK_WIDGET(text_format_box_));
+
+  font_button_ = GTK_BUTTON(gtk_button_new());
+  gtk_widget_add_css_class(GTK_WIDGET(font_button_), "flat");
+  update_font_button_label();
   gtk_widget_set_tooltip_text(GTK_WIDGET(font_button_), "Text annotation font");
-  g_signal_connect_swapped(font_button_, "notify::font-desc", G_CALLBACK(+[](Window* w) {
-    if (!w->updating_annotation_controls_) w->apply_annotation_controls(true);
+  g_signal_connect_swapped(font_button_, "clicked", G_CALLBACK(+[](Window* w) {
+    w->choose_font();
   }), this);
-  append_button(property_row, GTK_WIDGET(font_button_));
+  append_button(text_format_box_, GTK_WIDGET(font_button_));
 
   auto make_format_toggle = [&](const char* icon, const char* tooltip) {
     auto* button = GTK_TOGGLE_BUTTON(gtk_toggle_button_new());
     gtk_button_set_icon_name(GTK_BUTTON(button), icon);
     gtk_widget_set_tooltip_text(GTK_WIDGET(button), tooltip);
     gtk_widget_add_css_class(GTK_WIDGET(button), "flat");
-    append_button(property_row, GTK_WIDGET(button));
+    append_button(text_format_box_, GTK_WIDGET(button));
     g_signal_connect_swapped(button, "toggled", G_CALLBACK(+[](Window* w) {
       if (!w->updating_annotation_controls_) w->apply_annotation_controls(false);
     }), this);
     return button;
   };
-  append_button(property_row, gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+  append_button(text_format_box_, gtk_separator_new(GTK_ORIENTATION_VERTICAL));
   bold_button_ = make_format_toggle("format-text-bold-symbolic", "Bold");
   italic_button_ = make_format_toggle("format-text-italic-symbolic", "Italic");
   underline_button_ = make_format_toggle("format-text-underline-symbolic", "Underline");
@@ -393,6 +429,7 @@ void Window::build_ui() {
       annotation_align_ == TextAlign::Center ? align_center_button_ :
       annotation_align_ == TextAlign::Right ? align_right_button_ : align_left_button_, TRUE);
   updating_annotation_controls_ = false;
+  update_text_format_visibility();
 
   auto* signature = icon_button("review-signature-symbolic", "Insert saved signature");
   g_signal_connect_swapped(signature, "clicked", G_CALLBACK((+[](Window* w) {
@@ -506,6 +543,21 @@ void Window::build_ui() {
   g_signal_connect(editor_buffer, "changed", G_CALLBACK(+[](GtkTextBuffer*, gpointer data) {
     auto* w = self(data);
     if (w->inline_edit_active_) w->apply_inline_text_style();
+  }), this);
+  g_signal_connect_after(editor_buffer, "insert-text", G_CALLBACK(+[](
+      GtkTextBuffer* buffer, GtkTextIter* location, char* text, int len,
+      gpointer data) {
+    auto* w = self(data);
+    if (!w->inline_edit_active_ || w->loading_inline_text_) return;
+    if (!w->inline_typing_tag_)
+      w->inline_typing_tag_ = w->create_inline_format_tag(w->inline_typing_style_);
+    GtkTextIter start = *location;
+    GtkTextIter end = *location;
+    const int chars = g_utf8_strlen(text, len < 0 ? -1 : len);
+    gtk_text_iter_forward_chars(&end, chars);
+    if (!gtk_text_iter_equal(&start, &end))
+      gtk_text_buffer_apply_tag(buffer, w->inline_typing_tag_, &start, &end);
+    w->apply_inline_text_style();
   }), this);
   g_signal_connect(editor_buffer, "notify::cursor-position",
                    G_CALLBACK(+[](GObject*, GParamSpec*, gpointer data) {
@@ -1275,8 +1327,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
 
   if (!w->continuous_scroll_) {
     const std::uint64_t skip = w->inline_edit_active_ ? w->inline_edit_id_ : 0;
-    cairo_surface_t* surface =
-        w->document_->render_page(w->current_page_, w->zoom_, true, skip);
+    cairo_surface_t* surface = w->cached_page(w->current_page_, skip);
     if (!surface) return;
     const int sw = cairo_image_surface_get_width(surface);
     const int sh = cairo_image_surface_get_height(surface);
@@ -1284,7 +1335,6 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     const double y = std::max(0.0, (height - sh) / 2.0);
     cairo_set_source_surface(cr, surface, x, y);
     cairo_paint(cr);
-    cairo_surface_destroy(surface);
     draw_selection(x, y);
     draw_text_drag();
     return;
@@ -1301,13 +1351,12 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     if (bottom >= view_top && top <= view_bottom) {
       const std::uint64_t skip =
           w->inline_edit_active_ && i == w->inline_edit_page_ ? w->inline_edit_id_ : 0;
-      cairo_surface_t* surface = w->document_->render_page(i, w->zoom_, true, skip);
+      cairo_surface_t* surface = w->cached_page(i, skip);
       if (surface) {
         const int sw = cairo_image_surface_get_width(surface);
         const double x = std::max(0.0, (width - sw) / 2.0);
         cairo_set_source_surface(cr, surface, x, top);
         cairo_paint(cr);
-        cairo_surface_destroy(surface);
       }
     }
     top = bottom + kPageGap;
@@ -1391,23 +1440,6 @@ void Window::sync_annotation_controls() {
                annotation->fill.blue, annotation->fill.alpha};
   gtk_color_dialog_button_set_rgba(stroke_color_, &stroke);
   gtk_color_dialog_button_set_rgba(fill_color_, &fill);
-  if (annotation->type == AnnotationType::TextBox) {
-    const std::string font = (annotation->font_family.empty() ? "Sans" : annotation->font_family) +
-                             " " + std::to_string(annotation->font_size);
-    auto* description = pango_font_description_from_string(font.c_str());
-    gtk_font_dialog_button_set_font_desc(font_button_, description);
-    pango_font_description_free(description);
-    annotation_bold_ = annotation->bold;
-    annotation_italic_ = annotation->italic;
-    annotation_underline_ = annotation->underline;
-    annotation_align_ = annotation->align;
-    gtk_toggle_button_set_active(bold_button_, annotation_bold_);
-    gtk_toggle_button_set_active(italic_button_, annotation_italic_);
-    gtk_toggle_button_set_active(underline_button_, annotation_underline_);
-    gtk_toggle_button_set_active(
-        annotation_align_ == TextAlign::Center ? align_center_button_ :
-        annotation_align_ == TextAlign::Right ? align_right_button_ : align_left_button_, TRUE);
-  }
   updating_annotation_controls_ = false;
 }
 
@@ -1416,16 +1448,6 @@ void Window::apply_annotation_controls(bool text_and_font) {
   const GdkRGBA* fill = gtk_color_dialog_button_get_rgba(fill_color_);
   if (stroke) annotation_stroke_ = {stroke->red, stroke->green, stroke->blue, stroke->alpha};
   if (fill) annotation_fill_ = {fill->red, fill->green, fill->blue, fill->alpha};
-  if (text_and_font) {
-    const PangoFontDescription* description = gtk_font_dialog_button_get_font_desc(font_button_);
-    if (description) {
-      if (const char* family = pango_font_description_get_family(description)) {
-        annotation_font_ = family;
-        const int size = pango_font_description_get_size(description);
-        if (size > 0) annotation_font_size_ = size / static_cast<double>(PANGO_SCALE);
-      }
-    }
-  }
   if (bold_button_) annotation_bold_ = gtk_toggle_button_get_active(bold_button_);
   if (italic_button_) annotation_italic_ = gtk_toggle_button_get_active(italic_button_);
   if (underline_button_) annotation_underline_ = gtk_toggle_button_get_active(underline_button_);
@@ -1489,6 +1511,9 @@ void Window::start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_
   inline_edit_is_new_ = is_new;
   inline_edit_active_ = true;
   inline_edit_started_at_ = g_get_monotonic_time();
+  inline_typing_style_ = base_text_style(*found);
+  inline_typing_tag_ = nullptr;
+  update_text_format_visibility();
 
   GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
   GtkTextIter start;
@@ -1496,7 +1521,9 @@ void Window::start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_
   gtk_text_buffer_get_bounds(buffer, &start, &end);
   gtk_text_buffer_remove_all_tags(buffer, &start, &end);
   inline_format_tags_.clear();
+  loading_inline_text_ = true;
   gtk_text_buffer_set_text(buffer, found->text.c_str(), -1);
+  loading_inline_text_ = false;
   gtk_text_buffer_get_end_iter(buffer, &end);
   gtk_text_buffer_place_cursor(buffer, &end);
   position_inline_editor();
@@ -1670,8 +1697,11 @@ TextStyle Window::inline_style_at_offset(int offset) const {
   TextStyle style = base_text_style(inline_edit_annotation_);
   if (!inline_text_view_) return style;
   GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
+  const int count = gtk_text_buffer_get_char_count(buffer);
+  if (count > 0) offset = std::clamp(offset, 0, count - 1);
+  else offset = 0;
   GtkTextIter iter;
-  gtk_text_buffer_get_iter_at_offset(buffer, &iter, std::max(0, offset));
+  gtk_text_buffer_get_iter_at_offset(buffer, &iter, offset);
   for (const auto& [tag, tag_style] : inline_format_tags_)
     if (gtk_text_iter_has_tag(&iter, tag)) style = tag_style;
   return style;
@@ -1717,6 +1747,7 @@ void Window::sync_inline_format_controls() {
   GtkTextIter start;
   GtkTextIter end;
   int offset = 0;
+  const int count = gtk_text_buffer_get_char_count(buffer);
   if (gtk_text_buffer_get_selection_bounds(buffer, &start, &end)) {
     offset = gtk_text_iter_get_offset(&start);
   } else {
@@ -1724,8 +1755,16 @@ void Window::sync_inline_format_controls() {
     GtkTextIter cursor;
     gtk_text_buffer_get_iter_at_mark(buffer, &cursor, insert);
     offset = gtk_text_iter_get_offset(&cursor);
+    if (count > 0 && !gtk_text_iter_inside_word(&cursor) &&
+        !gtk_text_iter_starts_word(&cursor))
+      return;
   }
-  const TextStyle style = inline_style_at_offset(offset);
+  const TextStyle style = count > 0 ? inline_style_at_offset(offset) :
+                                      base_text_style(inline_edit_annotation_);
+  if (!text_style_equal(style, inline_typing_style_)) {
+    inline_typing_style_ = style;
+    inline_typing_tag_ = nullptr;
+  }
   updating_annotation_controls_ = true;
   annotation_align_ = inline_edit_annotation_.align;
   annotation_bold_ = style.bold;
@@ -1742,11 +1781,7 @@ void Window::sync_inline_format_controls() {
   gtk_toggle_button_set_active(
       annotation_align_ == TextAlign::Center ? align_center_button_ :
       annotation_align_ == TextAlign::Right ? align_right_button_ : align_left_button_, TRUE);
-  const std::string font = (style.font_family.empty() ? "Sans" : style.font_family) +
-                           " " + std::to_string(style.font_size);
-  auto* description = pango_font_description_from_string(font.c_str());
-  gtk_font_dialog_button_set_font_desc(font_button_, description);
-  pango_font_description_free(description);
+  update_font_button_label();
   updating_annotation_controls_ = false;
 }
 
@@ -1755,18 +1790,22 @@ void Window::apply_inline_annotation_controls(bool text_and_font) {
   GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
   GtkTextIter start;
   GtkTextIter end;
-  if (!gtk_text_buffer_get_selection_bounds(buffer, &start, &end)) {
+  bool has_range = gtk_text_buffer_get_selection_bounds(buffer, &start, &end);
+  if (!has_range) {
     GtkTextMark* insert = gtk_text_buffer_get_insert(buffer);
-    gtk_text_buffer_get_iter_at_mark(buffer, &start, insert);
-    end = start;
+    GtkTextIter cursor;
+    gtk_text_buffer_get_iter_at_mark(buffer, &cursor, insert);
+    start = cursor;
+    end = cursor;
     if (gtk_text_iter_inside_word(&start)) {
       gtk_text_iter_backward_word_start(&start);
       gtk_text_iter_forward_word_end(&end);
-    } else {
+      has_range = true;
+    } else if (gtk_text_iter_starts_word(&start)) {
       gtk_text_iter_forward_word_end(&end);
+      has_range = true;
     }
-    if (gtk_text_iter_equal(&start, &end)) return;
-    gtk_text_buffer_select_range(buffer, &start, &end);
+    if (has_range) gtk_text_buffer_select_range(buffer, &start, &end);
   }
   const int offset = gtk_text_iter_get_offset(&start);
   inline_edit_annotation_.align = annotation_align_;
@@ -1779,17 +1818,26 @@ void Window::apply_inline_annotation_controls(bool text_and_font) {
     style.font_family = annotation_font_;
     style.font_size = annotation_font_size_;
   }
+  inline_typing_style_ = style;
+  inline_typing_tag_ = nullptr;
+  if (!has_range) {
+    inline_typing_tag_ = create_inline_format_tag(style);
+    return;
+  }
   for (const auto& [tag, _style] : inline_format_tags_)
     gtk_text_buffer_remove_tag(buffer, tag, &start, &end);
   GtkTextTag* tag = create_inline_format_tag(style);
   gtk_text_buffer_apply_tag(buffer, tag, &start, &end);
+  inline_typing_tag_ = tag;
   apply_inline_text_style();
+  gtk_widget_grab_focus(GTK_WIDGET(inline_text_view_));
 }
 
 void Window::finish_inline_text_edit(bool commit) {
   if (!inline_edit_active_ || finishing_inline_edit_) return;
   finishing_inline_edit_ = true;
   inline_edit_active_ = false;
+  update_text_format_visibility();
   const auto page = inline_edit_page_;
   const auto id = inline_edit_id_;
   const bool is_new = inline_edit_is_new_;
@@ -1832,6 +1880,8 @@ void Window::finish_inline_text_edit(bool commit) {
   }
   g_free(text);
   inline_format_tags_.clear();
+  inline_typing_tag_ = nullptr;
+  inline_typing_style_ = {};
   inline_edit_page_ = 0;
   inline_edit_id_ = 0;
   inline_edit_is_new_ = false;
@@ -2035,8 +2085,56 @@ void Window::set_tool(AnnotationType type) {
   tool_active_ = true;
   crop_mode_ = false;
   selected_annotation_id_ = 0;
+  update_text_format_visibility();
   if (canvas_) gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "crosshair");
-  toast("Drag on the page to place the annotation");
+  toast(type == AnnotationType::TextBox ? "Click or drag to place the text box"
+                                        : "Drag on the page to place the annotation");
+}
+
+void Window::update_text_format_visibility() {
+  if (!text_format_box_) return;
+  const bool visible = inline_edit_active_ ||
+                       (tool_active_ && active_tool_ == AnnotationType::TextBox);
+  gtk_widget_set_visible(GTK_WIDGET(text_format_box_), visible);
+}
+
+void Window::update_font_button_label() {
+  if (!font_button_) return;
+  const std::string family = annotation_font_.empty() ? "Sans" : annotation_font_;
+  const int size = std::max(1, static_cast<int>(std::round(annotation_font_size_)));
+  gtk_button_set_label(font_button_, (family + " " + std::to_string(size)).c_str());
+}
+
+void Window::choose_font() {
+  auto* dialog = gtk_font_dialog_new();
+  gtk_font_dialog_set_title(dialog, "Choose annotation font");
+  const std::string font = (annotation_font_.empty() ? "Sans" : annotation_font_) +
+                           " " + std::to_string(annotation_font_size_);
+  auto* initial = pango_font_description_from_string(font.c_str());
+  g_object_set_data_full(G_OBJECT(dialog), "review-initial-font", initial,
+                         reinterpret_cast<GDestroyNotify>(pango_font_description_free));
+  gtk_font_dialog_choose_font(dialog, GTK_WINDOW(window_), initial, nullptr,
+      +[](GObject* source, GAsyncResult* result, gpointer data) {
+        auto* w = self(data);
+        GError* error = nullptr;
+        PangoFontDescription* description = gtk_font_dialog_choose_font_finish(
+            GTK_FONT_DIALOG(source), result, &error);
+        if (!description) {
+          if (error) g_error_free(error);
+          g_object_unref(source);
+          return;
+        }
+        if (const char* family = pango_font_description_get_family(description))
+          if (*family) w->annotation_font_ = family;
+        const int size = pango_font_description_get_size(description);
+        if (size > PANGO_SCALE)
+          w->annotation_font_size_ = std::clamp(
+              size / static_cast<double>(PANGO_SCALE), 6.0, 144.0);
+        pango_font_description_free(description);
+        w->update_font_button_label();
+        w->apply_annotation_controls(true);
+        g_object_unref(source);
+      }, this);
 }
 
 void Window::set_hand_tool() {
@@ -2044,6 +2142,7 @@ void Window::set_hand_tool() {
   tool_active_ = false;
   crop_mode_ = false;
   selected_annotation_id_ = 0;
+  update_text_format_visibility();
   if (canvas_) {
     gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "grab");
     gtk_widget_queue_draw(GTK_WIDGET(canvas_));
@@ -2054,6 +2153,7 @@ void Window::set_select_tool() {
   pointer_mode_ = PointerMode::Select;
   tool_active_ = false;
   crop_mode_ = false;
+  update_text_format_visibility();
   if (canvas_) gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "default");
   toast("Click to select; double-click text to edit; drag to move or resize");
   if (canvas_) gtk_widget_queue_draw(GTK_WIDGET(canvas_));

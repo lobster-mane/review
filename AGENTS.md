@@ -65,8 +65,13 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Continuous mode renders all pages in one drawing area. `page_top` and
   `page_at_canvas_y` are the layout source of truth; keep drawing, drag
   mapping, and scroll sync consistent with them.
+- Rendered page surfaces are cached in `Window`; `Document::revision()` and
+  the zoom level invalidate the cache. Keep revision bumps in sync with any
+  content mutation.
 - Inline text editing is an overlay inside `canvas_overlay_`. Call
   `finish_inline_text_edit()` before changing page, zoom, view mode, or layout.
+  Newly typed text inherits the current typing style through the editor's
+  `insert-text` handler.
 
 ## PDF and editing constraints
 

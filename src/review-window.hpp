@@ -31,6 +31,8 @@ private:
   void refresh();
   void rebuild_sidebar();
   void render_current();
+  cairo_surface_t* cached_page(std::size_t page, std::uint64_t skip);
+  void clear_page_cache();
   void update_title();
   void set_continuous_scroll(bool enabled);
   void update_view_actions();
@@ -70,6 +72,9 @@ private:
   void apply_inline_text_spans();
   void apply_inline_annotation_controls(bool text_and_font);
   void sync_inline_format_controls();
+  void update_text_format_visibility();
+  void choose_font();
+  void update_font_button_label();
   [[nodiscard]] TextStyle inline_style_at_offset(int offset) const;
   [[nodiscard]] std::vector<TextSpan> inline_text_spans() const;
   GtkTextTag* create_inline_format_tag(const TextStyle& style);
@@ -91,13 +96,17 @@ private:
   GtkWidget* inline_editor_{};
   GtkTextView* inline_text_view_{};
   GtkTextTag* inline_text_tag_{};
+  GtkTextTag* inline_typing_tag_{};
+  TextStyle inline_typing_style_{};
+  bool loading_inline_text_{};
   std::vector<std::pair<GtkTextTag*, TextStyle>> inline_format_tags_{};
   GtkSearchEntry* search_{};
   GtkToggleButton* active_tool_button_{};
   GtkToggleButton* select_button_{};
   GtkColorDialogButton* stroke_color_{};
   GtkColorDialogButton* fill_color_{};
-  GtkFontDialogButton* font_button_{};
+  GtkBox* text_format_box_{};
+  GtkButton* font_button_{};
   GtkToggleButton* bold_button_{};
   GtkToggleButton* italic_button_{};
   GtkToggleButton* underline_button_{};
@@ -107,6 +116,14 @@ private:
   GtkLabel* page_label_{};
   GMenu* recent_menu_{};
   std::unique_ptr<Document> document_{};
+  struct CachedPage {
+    std::size_t page;
+    std::uint64_t skip;
+    cairo_surface_t* surface;
+  };
+  std::vector<CachedPage> page_cache_;
+  std::uint64_t page_cache_revision_{};
+  double page_cache_zoom_{};
   SignatureStore signatures_{};
   std::size_t current_page_{};
   double zoom_{1.0};

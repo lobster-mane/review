@@ -93,8 +93,10 @@ With the text tool, click the page to create a small text box, or drag to size
 it; the box outline is shown while dragging. Double-click a text annotation to
 edit it directly on the page. The inline editor matches the final page styling,
 and text wraps inside its box instead of overflowing. Select words in the
-editor and use the toolbar to format each word individually. Click elsewhere or
-press `Ctrl+Enter` to finish; press `Escape` to cancel.
+editor and use the toolbar to format each word individually. The font family
+and size are remembered for the next text box, and formatting controls appear
+only while adding or editing text. Click elsewhere or press `Ctrl+Enter` to
+finish; press `Escape` to cancel.
 
 A normal **Save** keeps supported annotations editable in other PDF viewers.
 Choose **Export Flattened Copy…** to paint the visible result permanently into

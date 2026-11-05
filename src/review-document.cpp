@@ -346,6 +346,7 @@ bool Document::open_pdf(const std::string& path, const std::string& password,
   dirty_ = destructive_changes_ = false;
   undo_.clear();
   redo_.clear();
+  ++revision_;
   return true;
 }
 
@@ -371,6 +372,7 @@ bool Document::open_image(const std::string& path, std::string& error) {
   dirty_ = destructive_changes_ = false;
   undo_.clear();
   redo_.clear();
+  ++revision_;
   return true;
 }
 
@@ -599,6 +601,7 @@ void Document::checkpoint() {
 void Document::changed(bool destructive) {
   dirty_ = true;
   destructive_changes_ = destructive_changes_ || destructive;
+  ++revision_;
 }
 
 bool Document::undo() {
@@ -608,6 +611,7 @@ bool Document::undo() {
   destructive_changes_ = undo_.back().destructive;
   undo_.pop_back();
   dirty_ = true;
+  ++revision_;
   return true;
 }
 
@@ -618,6 +622,7 @@ bool Document::redo() {
   destructive_changes_ = redo_.back().destructive;
   redo_.pop_back();
   dirty_ = true;
+  ++revision_;
   return true;
 }
 
