@@ -725,7 +725,7 @@ void Window::build_ui() {
   g_signal_connect(double_click, "pressed", G_CALLBACK(+[](
       GtkGestureClick*, int n_press, double x, double y, gpointer data) {
     auto* w = self(data);
-    if (n_press != 2 || !w->document_ || w->pointer_mode_ != PointerMode::Select) return;
+    if (n_press != 2 || !w->document_) return;
     if (w->continuous_scroll_) w->set_current_page(w->page_at_canvas_y(y));
     w->select_annotation_at(w->canvas_to_page(x, y));
     if (auto* annotation = w->selected_annotation();
