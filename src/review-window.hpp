@@ -70,7 +70,7 @@ private:
 
   AdwApplicationWindow* window_{};
   AdwToastOverlay* toast_overlay_{};
-  AdwOverlaySplitView* split_{};
+  GtkPaned* split_{};
   GtkListBox* sidebar_{};
   GtkDrawingArea* canvas_{};
   GtkScrolledWindow* canvas_scroll_{};
@@ -89,6 +89,7 @@ private:
   bool fit_width_{true};
   bool continuous_scroll_{false};
   bool syncing_sidebar_{false};
+  int sidebar_position_{180};
   bool warned_destructive_{};
   bool tool_active_{};
   bool crop_mode_{};

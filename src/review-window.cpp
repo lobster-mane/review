@@ -185,8 +185,15 @@ void Window::build_ui() {
 
   auto* sidebar_button = icon_button("sidebar-show-symbolic", "Show pages");
   g_signal_connect_swapped(sidebar_button, "clicked", G_CALLBACK(+[](Window* w) {
-    adw_overlay_split_view_set_show_sidebar(w->split_,
-        !adw_overlay_split_view_get_show_sidebar(w->split_));
+    auto* sidebar = gtk_paned_get_start_child(w->split_);
+    if (!sidebar) return;
+    if (gtk_widget_get_visible(sidebar)) {
+      w->sidebar_position_ = gtk_paned_get_position(w->split_);
+      gtk_widget_set_visible(sidebar, FALSE);
+    } else {
+      gtk_widget_set_visible(sidebar, TRUE);
+      gtk_paned_set_position(w->split_, w->sidebar_position_);
+    }
   }), this);
   adw_header_bar_pack_start(header, sidebar_button);
 
@@ -373,19 +380,21 @@ void Window::build_ui() {
   gtk_box_append(annotation_bar, GTK_WIDGET(property_row));
   adw_toolbar_view_add_top_bar(toolbar_view, GTK_WIDGET(annotation_bar));
 
-  split_ = ADW_OVERLAY_SPLIT_VIEW(adw_overlay_split_view_new());
-  adw_overlay_split_view_set_sidebar_width_fraction(split_, 0.15);
-  adw_overlay_split_view_set_min_sidebar_width(split_, 160);
-  adw_overlay_split_view_set_max_sidebar_width(split_, 220);
+  split_ = GTK_PANED(gtk_paned_new(GTK_ORIENTATION_HORIZONTAL));
+  gtk_paned_set_position(split_, sidebar_position_);
+  gtk_paned_set_resize_start_child(split_, FALSE);
+  gtk_paned_set_resize_end_child(split_, TRUE);
+  gtk_paned_set_shrink_start_child(split_, FALSE);
   adw_toolbar_view_set_content(toolbar_view, GTK_WIDGET(split_));
 
   auto* sidebar_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+  gtk_widget_set_size_request(GTK_WIDGET(sidebar_scroll), 160, -1);
   sidebar_ = GTK_LIST_BOX(gtk_list_box_new());
   gtk_list_box_set_selection_mode(sidebar_, GTK_SELECTION_MULTIPLE);
   gtk_widget_add_css_class(GTK_WIDGET(sidebar_), "navigation-sidebar");
   gtk_list_box_set_activate_on_single_click(sidebar_, TRUE);
   gtk_scrolled_window_set_child(sidebar_scroll, GTK_WIDGET(sidebar_));
-  adw_overlay_split_view_set_sidebar(split_, GTK_WIDGET(sidebar_scroll));
+  gtk_paned_set_start_child(split_, GTK_WIDGET(sidebar_scroll));
   g_signal_connect_swapped(sidebar_, "row-activated", G_CALLBACK(+[](
       Window* w, GtkListBoxRow* row) {
     if (row) w->select_page(row_index(row));
@@ -485,7 +494,7 @@ void Window::build_ui() {
   page_label_ = GTK_LABEL(gtk_label_new("No document"));
   gtk_box_append(status, GTK_WIDGET(page_label_));
   gtk_box_append(content, GTK_WIDGET(status));
-  adw_overlay_split_view_set_content(split_, GTK_WIDGET(content));
+  gtk_paned_set_end_child(split_, GTK_WIDGET(content));
 
   auto* drag = gtk_gesture_drag_new();
   g_signal_connect(drag, "drag-begin", G_CALLBACK((+[](
