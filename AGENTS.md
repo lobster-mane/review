@@ -67,6 +67,9 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Continuous mode renders all pages in one drawing area. `page_top` and
   `page_at_canvas_y` are the layout source of truth; keep drawing, drag
   mapping, and scroll sync consistent with them.
+- In single-page mode, scrolling at the page edge opens the next or previous
+  page immediately. A pending-page-turn flag suppresses extra events from the
+  same gesture; do not reintroduce scroll velocity thresholds.
 - The sidebar supports multi-page selection (`Ctrl`/`Shift`). `set_current_page`
   must not clear a multi-row selection; batch actions consume `selected_pages()`.
 - Dragging an annotation across a page boundary in continuous mode transfers it
