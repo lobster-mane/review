@@ -100,8 +100,25 @@ Window::Window(AdwApplication* application) {
 }
 
 Window::~Window() {
+  if (preload_source_id_) {
+    g_source_remove(preload_source_id_);
+    preload_source_id_ = 0;
+  }
   clear_page_cache();
   if (recent_menu_) g_object_unref(recent_menu_);
+}
+
+void Window::schedule_preload_next_page() {
+  if (preload_source_id_ || !document_ ||
+      current_page_ + 1 >= document_->page_count())
+    return;
+  preload_source_id_ = g_idle_add(+[](gpointer data) -> gboolean {
+    auto* w = static_cast<Window*>(data);
+    w->preload_source_id_ = 0;
+    if (w->document_ && w->current_page_ + 1 < w->document_->page_count())
+      w->cached_page(w->current_page_ + 1, 0);
+    return G_SOURCE_REMOVE;
+  }, this);
 }
 
 void Window::clear_page_cache() {
@@ -755,6 +772,7 @@ void Window::build_ui() {
           point.y += py;
         }
       }
+      w->document_->invalidate_rendering();
       gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
       return;
     }
@@ -1166,6 +1184,7 @@ void Window::render_current() {
   }
   update_page_status();
   gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+  schedule_preload_next_page();
 }
 
 void Window::set_current_page(std::size_t page) {
@@ -1181,6 +1200,7 @@ void Window::set_current_page(std::size_t page) {
   }
   update_page_status();
   gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+  schedule_preload_next_page();
 }
 
 void Window::update_current_page_from_scroll() {
@@ -1301,6 +1321,22 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     cairo_restore(cr);
   };
 
+  auto draw_edit_bounds = [&](double x, double y) {
+    if (!w->inline_edit_active_) return;
+    const auto* annotation = w->selected_annotation();
+    if (!annotation || annotation->id != w->inline_edit_id_) return;
+    const auto& b = annotation->bounds;
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 0.20, 0.52, 0.95, 0.85);
+    cairo_set_line_width(cr, 1.0);
+    const double dash[] = {4.0, 3.0};
+    cairo_set_dash(cr, dash, 2, 0);
+    cairo_rectangle(cr, x + b.x * w->zoom_, y + b.y * w->zoom_,
+                    b.width * w->zoom_, b.height * w->zoom_);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+  };
+
   auto draw_text_drag = [&]() {
     if (!w->drag_active_ || !w->drag_is_text_ || !w->tool_active_ ||
         w->current_page_ >= w->document_->page_count()) return;
@@ -1336,6 +1372,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     cairo_set_source_surface(cr, surface, x, y);
     cairo_paint(cr);
     draw_selection(x, y);
+    draw_edit_bounds(x, y);
     draw_text_drag();
     return;
   }
@@ -1366,6 +1403,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   const double current_x = std::max(
       0.0, (width - current.width_points * w->zoom_) / 2.0);
   draw_selection(current_x, w->page_top(w->current_page_));
+  draw_edit_bounds(current_x, w->page_top(w->current_page_));
   draw_text_drag();
 }
 
@@ -1531,7 +1569,29 @@ void Window::start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_
   apply_inline_text_spans();
   apply_inline_text_style();
   gtk_widget_set_visible(inline_editor_, TRUE);
-  gtk_widget_grab_focus(GTK_WIDGET(inline_text_view_));
+  struct FocusRequest {
+    Window* window;
+    int attempts{};
+  };
+  auto* focus_request = new FocusRequest{this};
+  gtk_widget_add_tick_callback(GTK_WIDGET(inline_text_view_), +[](
+      GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
+    auto* request = static_cast<FocusRequest*>(data);
+    graphene_rect_t bounds;
+    if (gtk_widget_compute_bounds(widget,
+                                  GTK_WIDGET(request->window->canvas_scroll_),
+                                  &bounds) &&
+        gtk_widget_get_mapped(widget) && bounds.origin.y > 1.0) {
+      if (request->window->inline_edit_active_) gtk_widget_grab_focus(widget);
+      delete request;
+      return G_SOURCE_REMOVE;
+    }
+    if (++request->attempts > 60) {
+      delete request;
+      return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+  }, focus_request, nullptr);
 
   if (click) {
     struct WordRequest {
@@ -1830,7 +1890,17 @@ void Window::apply_inline_annotation_controls(bool text_and_font) {
   gtk_text_buffer_apply_tag(buffer, tag, &start, &end);
   inline_typing_tag_ = tag;
   apply_inline_text_style();
-  gtk_widget_grab_focus(GTK_WIDGET(inline_text_view_));
+  struct FormatFocusRequest {
+    Window* window;
+  };
+  auto* focus_request = new FormatFocusRequest{this};
+  gtk_widget_add_tick_callback(GTK_WIDGET(inline_text_view_), +[](
+      GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
+    auto* request = static_cast<FormatFocusRequest*>(data);
+    if (request->window->inline_edit_active_) gtk_widget_grab_focus(widget);
+    delete request;
+    return G_SOURCE_REMOVE;
+  }, focus_request, nullptr);
 }
 
 void Window::finish_inline_text_edit(bool commit) {

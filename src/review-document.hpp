@@ -35,6 +35,7 @@ public:
   [[nodiscard]] bool destructive_changes() const { return destructive_changes_; }
   [[nodiscard]] bool read_only() const { return read_only_; }
   [[nodiscard]] std::uint64_t revision() const { return revision_; }
+  void invalidate_rendering();
 
   cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true,
                                std::uint64_t skip_annotation_id = 0) const;

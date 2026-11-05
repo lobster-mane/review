@@ -59,8 +59,9 @@ runtime. See [Development](#development) to build from source.
 Choose **View → Continuous Scroll** (`Ctrl+1`) for a long scrolling view, or
 **View → Single Page** (`Ctrl+2`) for one page at a time. In single-page mode,
 scroll down at the bottom of a page to open the next page, or up at the top to
-open the previous one. The sidebar selection and page counter follow the visible
-page. Review remembers the last view mode for new windows.
+open the previous one. The next page is preloaded to make page turns faster.
+The sidebar selection and page counter follow the visible page. Review
+remembers the last view mode for new windows.
 
 ## Signatures
 
@@ -95,8 +96,9 @@ edit it directly on the page. The inline editor matches the final page styling,
 and text wraps inside its box instead of overflowing. Select words in the
 editor and use the toolbar to format each word individually. The font family
 and size are remembered for the next text box, and formatting controls appear
-only while adding or editing text. Click elsewhere or press `Ctrl+Enter` to
-finish; press `Escape` to cancel.
+only while adding or editing text. The text box outline remains visible while
+editing, and moving the box moves its text with it. Click elsewhere or press
+`Ctrl+Enter` to finish; press `Escape` to cancel.
 
 A normal **Save** keeps supported annotations editable in other PDF viewers.
 Choose **Export Flattened Copy…** to paint the visible result permanently into

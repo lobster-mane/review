@@ -33,6 +33,7 @@ private:
   void render_current();
   cairo_surface_t* cached_page(std::size_t page, std::uint64_t skip);
   void clear_page_cache();
+  void schedule_preload_next_page();
   void update_title();
   void set_continuous_scroll(bool enabled);
   void update_view_actions();
@@ -124,6 +125,7 @@ private:
   std::vector<CachedPage> page_cache_;
   std::uint64_t page_cache_revision_{};
   double page_cache_zoom_{};
+  guint preload_source_id_{};
   SignatureStore signatures_{};
   std::size_t current_page_{};
   double zoom_{1.0};

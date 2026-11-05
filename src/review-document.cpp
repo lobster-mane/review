@@ -598,6 +598,8 @@ void Document::checkpoint() {
   redo_.clear();
 }
 
+void Document::invalidate_rendering() { ++revision_; }
+
 void Document::changed(bool destructive) {
   dirty_ = true;
   destructive_changes_ = destructive_changes_ || destructive;
