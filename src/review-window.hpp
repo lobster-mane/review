@@ -31,6 +31,14 @@ private:
   void rebuild_sidebar();
   void render_current();
   void update_title();
+  void set_continuous_scroll(bool enabled);
+  void update_view_actions();
+  void set_current_page(std::size_t page);
+  void update_current_page_from_scroll();
+  void update_page_status();
+  void scroll_to_page(std::size_t page, bool scroll_to_bottom);
+  [[nodiscard]] std::size_t page_at_canvas_y(double y) const;
+  [[nodiscard]] double page_top(std::size_t page) const;
   void remember_recent(const std::string& path);
   void rebuild_recent_menu();
   void select_page(std::size_t page, bool scroll_to_bottom = false);
@@ -79,6 +87,7 @@ private:
   std::size_t current_page_{};
   double zoom_{1.0};
   bool fit_width_{true};
+  bool continuous_scroll_{false};
   bool warned_destructive_{};
   bool tool_active_{};
   bool crop_mode_{};

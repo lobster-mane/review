@@ -16,6 +16,9 @@ namespace fs = std::filesystem;
 namespace review {
 namespace {
 
+constexpr double kPageGap = 12.0;
+constexpr double kCanvasMargin = 24.0;
+
 std::vector<PageRef> page_clipboard;
 bool clipboard_is_cut = false;
 std::vector<PageRef> dragged_pages;
@@ -86,7 +89,31 @@ Window::~Window() {
   if (recent_menu_) g_object_unref(recent_menu_);
 }
 
-void Window::present() { gtk_window_present(GTK_WINDOW(window_)); }
+void Window::present() {
+  gtk_window_present(GTK_WINDOW(window_));
+  // A document opened from the command line is first rendered before the
+  // window has its real width; refit once the viewport is laid out.
+  if (!document_ || !fit_width_) return;
+  struct FitRequest {
+    Window* window;
+    int attempts{};
+  };
+  auto* request = new FitRequest{this};
+  gtk_widget_add_tick_callback(GTK_WIDGET(canvas_scroll_), +[](
+      GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
+    auto* request = static_cast<FitRequest*>(data);
+    if (gtk_widget_get_width(widget) > 200) {
+      request->window->render_current();
+      delete request;
+      return G_SOURCE_REMOVE;
+    }
+    if (++request->attempts >= 60) {
+      delete request;
+      return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+  }, request, nullptr);
+}
 
 void Window::load_preferences() {
   const auto path = fs::path(g_get_user_config_dir()) / "review" / "preferences.ini";
@@ -118,6 +145,8 @@ void Window::load_preferences() {
   if (g_key_file_has_key(key_file, "Annotations", "font-size", nullptr))
     annotation_font_size_ = std::clamp(
         g_key_file_get_double(key_file, "Annotations", "font-size", nullptr), 6.0, 144.0);
+  if (g_key_file_has_key(key_file, "View", "continuous-scroll", nullptr))
+    continuous_scroll_ = g_key_file_get_boolean(key_file, "View", "continuous-scroll", nullptr);
   g_key_file_unref(key_file);
 }
 
@@ -136,6 +165,7 @@ void Window::save_preferences() const {
   g_key_file_set_double(key_file, "Annotations", "fill-alpha", annotation_fill_.alpha);
   g_key_file_set_string(key_file, "Annotations", "font-family", annotation_font_.c_str());
   g_key_file_set_double(key_file, "Annotations", "font-size", annotation_font_size_);
+  g_key_file_set_boolean(key_file, "View", "continuous-scroll", continuous_scroll_);
   if (g_key_file_save_to_file(key_file, path.c_str(), nullptr)) g_chmod(path.c_str(), 0600);
   g_key_file_unref(key_file);
 }
@@ -396,6 +426,10 @@ void Window::build_ui() {
   gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "grab");
   gtk_drawing_area_set_draw_func(canvas_, draw_page, this, nullptr);
   gtk_scrolled_window_set_child(canvas_scroll_, GTK_WIDGET(canvas_));
+  g_signal_connect(gtk_scrolled_window_get_vadjustment(canvas_scroll_), "value-changed",
+                   G_CALLBACK(+[](GtkAdjustment*, gpointer data) {
+                     self(data)->update_current_page_from_scroll();
+                   }), this);
   gtk_box_append(content, GTK_WIDGET(canvas_scroll_));
 
   auto* page_scroll = gtk_event_controller_scroll_new(
@@ -405,6 +439,7 @@ void Window::build_ui() {
   g_signal_connect(page_scroll, "scroll", G_CALLBACK(+[](
       GtkEventControllerScroll*, double, double dy, gpointer data) -> gboolean {
     auto* w = self(data);
+    if (w->continuous_scroll_) return FALSE;
     if (!w->document_ || dy == 0.0 || w->document_->page_count() < 2) return FALSE;
     auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
     const double lower = gtk_adjustment_get_lower(adjustment);
@@ -448,6 +483,7 @@ void Window::build_ui() {
     auto* w = self(data);
     if (!w->document_) return;
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    if (w->continuous_scroll_) w->set_current_page(w->page_at_canvas_y(y));
     w->drag_start_ = w->canvas_to_page(x, y);
     if (w->pointer_mode_ == PointerMode::Hand && !w->crop_mode_) {
       w->pan_horizontal_start_ = gtk_adjustment_get_value(
@@ -611,6 +647,12 @@ void Window::install_actions() {
     {"secure-crop", +[](GSimpleAction*, GVariant*, gpointer d){ self(d)->start_destructive(true); }, nullptr, nullptr, nullptr, {}},
     {"draw-signature", +[](GSimpleAction*, GVariant*, gpointer d){ self(d)->draw_signature_dialog(); }, nullptr, nullptr, nullptr, {}},
     {"import-signature", +[](GSimpleAction*, GVariant*, gpointer d){ self(d)->choose_signature_image(); }, nullptr, nullptr, nullptr, {}},
+    {"continuous-scroll", nullptr, nullptr, "false", +[](GSimpleAction*, GVariant*, gpointer d){
+      self(d)->set_continuous_scroll(true);
+    }, {}},
+    {"single-page", nullptr, nullptr, "true", +[](GSimpleAction*, GVariant*, gpointer d){
+      self(d)->set_continuous_scroll(false);
+    }, {}},
     {"zoom-in", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=false;w->zoom_=std::min(5.0,w->zoom_*1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
     {"zoom-out", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=false;w->zoom_=std::max(.15,w->zoom_/1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
     {"fit-width", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=true;w->render_current(); }, nullptr, nullptr, nullptr, {}},
@@ -621,6 +663,7 @@ void Window::install_actions() {
     }, nullptr, nullptr, nullptr, {}},
   };
   g_action_map_add_action_entries(G_ACTION_MAP(window_), entries, G_N_ELEMENTS(entries), this);
+  update_view_actions();
 
   auto* app = gtk_window_get_application(GTK_WINDOW(window_));
   const struct { const char* action; const char* accel; } shortcuts[] = {
@@ -628,6 +671,8 @@ void Window::install_actions() {
     {"win.save-as", "<primary><shift>s"}, {"win.undo", "<primary>z"},
     {"win.redo", "<primary><shift>z"}, {"win.copy-pages", "<primary>c"},
     {"win.cut-pages", "<primary>x"}, {"win.paste-pages", "<primary>v"},
+    {"win.continuous-scroll", "<primary>1"},
+    {"win.single-page", "<primary>2"},
     {"win.zoom-in", "<primary>plus"},
     {"win.zoom-out", "<primary>minus"}, {"win.print", "<primary>p"},
   };
@@ -670,6 +715,7 @@ void Window::open(const std::string& path) {
           else {
             w->document_ = std::move(document); w->current_page_ = 0;
             w->fit_width_ = true; w->zoom_ = 1.0; w->refresh();
+            w->scroll_to_page(0, false);
             w->remember_recent(requested_path);
             w->toast("Protected PDF opened in view-only mode");
           }
@@ -689,6 +735,7 @@ void Window::open(const std::string& path) {
   warned_destructive_ = false;
   remember_recent(path);
   refresh();
+  scroll_to_page(0, false);
 }
 
 void Window::remember_recent(const std::string& path) {
@@ -805,26 +852,169 @@ void Window::rebuild_sidebar() {
   }
 }
 
-void Window::render_current() {
+double Window::page_top(std::size_t page) const {
+  double top = kCanvasMargin;
+  if (!document_) return top;
+  for (std::size_t i = 0; i < page && i < document_->page_count(); ++i)
+    top += document_->page(i).height_points * zoom_ + kPageGap;
+  return top;
+}
+
+std::size_t Window::page_at_canvas_y(double y) const {
+  if (!document_ || document_->page_count() == 0) return 0;
+  double top = kCanvasMargin;
+  for (std::size_t i = 0; i < document_->page_count(); ++i) {
+    const double height = document_->page(i).height_points * zoom_;
+    if (y < top + height) return i;
+    top += height + kPageGap;
+  }
+  return document_->page_count() - 1;
+}
+
+void Window::update_page_status() {
+  if (!page_label_) return;
   if (!document_ || document_->page_count() == 0) {
-    gtk_drawing_area_set_content_width(canvas_, 1);
-    gtk_drawing_area_set_content_height(canvas_, 1);
     gtk_label_set_text(page_label_, "No document");
-    gtk_widget_queue_draw(GTK_WIDGET(canvas_));
     return;
   }
-  const auto& page = document_->page(current_page_);
-  if (fit_width_) {
-    const int available = std::max(200, gtk_widget_get_width(GTK_WIDGET(canvas_scroll_)) - 48);
-    zoom_ = std::clamp(available / std::max(1.0, page.width_points), .15, 3.0);
-  }
-  gtk_drawing_area_set_content_width(canvas_, std::max(1, static_cast<int>(std::ceil(page.width_points * zoom_))));
-  gtk_drawing_area_set_content_height(canvas_, std::max(1, static_cast<int>(std::ceil(page.height_points * zoom_))));
   const std::string status = "Page " + std::to_string(current_page_ + 1) + " of " +
       std::to_string(document_->page_count()) + "  •  " +
       std::to_string(static_cast<int>(zoom_ * 100)) + "%";
   gtk_label_set_text(page_label_, status.c_str());
+}
+
+void Window::render_current() {
+  if (!document_ || document_->page_count() == 0) {
+    gtk_drawing_area_set_content_width(canvas_, 1);
+    gtk_drawing_area_set_content_height(canvas_, 1);
+    update_page_status();
+    gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+    return;
+  }
+  if (current_page_ >= document_->page_count())
+    current_page_ = document_->page_count() - 1;
+
+  double reference_width = document_->page(current_page_).width_points;
+  if (continuous_scroll_) {
+    reference_width = 0;
+    for (std::size_t i = 0; i < document_->page_count(); ++i)
+      reference_width = std::max(reference_width, document_->page(i).width_points);
+  }
+  if (fit_width_) {
+    const int margins = continuous_scroll_ ? static_cast<int>(kCanvasMargin * 2) : 48;
+    const int available = std::max(
+        200, gtk_widget_get_width(GTK_WIDGET(canvas_scroll_)) - margins);
+    zoom_ = std::clamp(available / std::max(1.0, reference_width), .15, 3.0);
+  }
+
+  if (continuous_scroll_) {
+    double max_width = 0;
+    double total_height = kCanvasMargin * 2;
+    for (std::size_t i = 0; i < document_->page_count(); ++i) {
+      const auto& page = document_->page(i);
+      max_width = std::max(max_width, page.width_points);
+      total_height += page.height_points * zoom_;
+      if (i + 1 < document_->page_count()) total_height += kPageGap;
+    }
+    gtk_drawing_area_set_content_width(
+        canvas_, std::max(1, static_cast<int>(std::ceil(max_width * zoom_ + kCanvasMargin * 2))));
+    gtk_drawing_area_set_content_height(
+        canvas_, std::max(1, static_cast<int>(std::ceil(total_height))));
+  } else {
+    const auto& page = document_->page(current_page_);
+    gtk_drawing_area_set_content_width(
+        canvas_, std::max(1, static_cast<int>(std::ceil(page.width_points * zoom_))));
+    gtk_drawing_area_set_content_height(
+        canvas_, std::max(1, static_cast<int>(std::ceil(page.height_points * zoom_))));
+  }
+  update_page_status();
   gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+}
+
+void Window::set_current_page(std::size_t page) {
+  if (!document_ || page >= document_->page_count() || page == current_page_) return;
+  current_page_ = page;
+  selected_annotation_id_ = 0;
+  if (sidebar_) {
+    gtk_list_box_unselect_all(sidebar_);
+    if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
+      gtk_list_box_select_row(sidebar_, row);
+  }
+  update_page_status();
+  gtk_widget_queue_draw(GTK_WIDGET(canvas_));
+}
+
+void Window::update_current_page_from_scroll() {
+  if (!continuous_scroll_ || !document_ || !canvas_scroll_) return;
+  auto* adjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
+  const double top = gtk_adjustment_get_value(adjustment);
+  const double maximum = gtk_adjustment_get_upper(adjustment) -
+                         gtk_adjustment_get_page_size(adjustment);
+  const double y = maximum > 0.0 && top >= maximum - 0.5
+      ? top + gtk_adjustment_get_page_size(adjustment) - 1.0
+      : top + 1.0;
+  set_current_page(page_at_canvas_y(y));
+}
+
+void Window::scroll_to_page(std::size_t page, bool scroll_to_bottom) {
+  if (!document_ || !canvas_scroll_ || page >= document_->page_count()) return;
+  auto* adjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
+  double target = gtk_adjustment_get_lower(adjustment);
+  if (continuous_scroll_) {
+    target = page_top(page);
+    if (scroll_to_bottom)
+      target += document_->page(page).height_points * zoom_ -
+                gtk_adjustment_get_page_size(adjustment);
+  } else if (scroll_to_bottom) {
+    target = gtk_adjustment_get_upper(adjustment) -
+             gtk_adjustment_get_page_size(adjustment);
+  }
+  struct ScrollRequest {
+    Window* window;
+    double value;
+    std::size_t page;
+  };
+  auto* request = new ScrollRequest{this, target, page};
+  gtk_widget_add_tick_callback(GTK_WIDGET(canvas_scroll_), +[](
+      GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
+    auto* request = static_cast<ScrollRequest*>(data);
+    auto* adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget));
+    const double lower = gtk_adjustment_get_lower(adjustment);
+    const double upper = gtk_adjustment_get_upper(adjustment) -
+                         gtk_adjustment_get_page_size(adjustment);
+    gtk_adjustment_set_value(adjustment, std::clamp(request->value, lower,
+                                                    std::max(lower, upper)));
+    request->window->set_current_page(request->page);
+    delete request;
+    return G_SOURCE_REMOVE;
+  }, request, nullptr);
+}
+
+void Window::update_view_actions() {
+  auto* map = G_ACTION_MAP(window_);
+  if (auto* action = g_action_map_lookup_action(map, "continuous-scroll"))
+    g_simple_action_set_state(G_SIMPLE_ACTION(action),
+                              g_variant_new_boolean(continuous_scroll_));
+  if (auto* action = g_action_map_lookup_action(map, "single-page"))
+    g_simple_action_set_state(G_SIMPLE_ACTION(action),
+                              g_variant_new_boolean(!continuous_scroll_));
+}
+
+void Window::set_continuous_scroll(bool enabled) {
+  if (enabled == continuous_scroll_) {
+    update_view_actions();
+    return;
+  }
+  const auto keep_page = current_page_;
+  continuous_scroll_ = enabled;
+  selected_annotation_id_ = 0;
+  save_preferences();
+  update_view_actions();
+  render_current();
+  if (document_) {
+    set_current_page(keep_page);
+    scroll_to_page(current_page_, false);
+  }
 }
 
 void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer data) {
@@ -832,72 +1022,92 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   cairo_set_source_rgb(cr, .18, .18, .18);
   cairo_paint(cr);
   if (!w->document_ || w->document_->page_count() == 0) return;
-  cairo_surface_t* surface = w->document_->render_page(w->current_page_, w->zoom_, true);
-  if (!surface) return;
-  const int sw = cairo_image_surface_get_width(surface);
-  const int sh = cairo_image_surface_get_height(surface);
-  const double x = std::max(0.0, (width - sw) / 2.0);
-  const double y = std::max(0.0, (height - sh) / 2.0);
-  cairo_set_source_surface(cr, surface, x, y);
-  cairo_paint(cr);
-  cairo_surface_destroy(surface);
-  if (w->pointer_mode_ == PointerMode::Select) {
-    if (const auto* annotation = w->selected_annotation()) {
-      const auto& b = annotation->bounds;
-      cairo_save(cr);
-      cairo_set_source_rgb(cr, 0.20, 0.52, 0.95);
-      cairo_set_line_width(cr, 2.0);
-      const double dash[] = {5.0, 4.0};
-      cairo_set_dash(cr, dash, 2, 0);
-      cairo_rectangle(cr, x + b.x * w->zoom_, y + b.y * w->zoom_,
-                      b.width * w->zoom_, b.height * w->zoom_);
-      cairo_stroke(cr);
-      cairo_set_dash(cr, nullptr, 0, 0);
-      const double handle = 9.0;
-      cairo_rectangle(cr, x + (b.x + b.width) * w->zoom_ - handle / 2.0,
-                      y + (b.y + b.height) * w->zoom_ - handle / 2.0,
-                      handle, handle);
-      cairo_set_source_rgb(cr, 1, 1, 1);
-      cairo_fill_preserve(cr);
-      cairo_set_source_rgb(cr, 0.20, 0.52, 0.95);
-      cairo_stroke(cr);
-      cairo_restore(cr);
-    }
+
+  auto draw_selection = [&](double x, double y) {
+    if (w->pointer_mode_ != PointerMode::Select) return;
+    const auto* annotation = w->selected_annotation();
+    if (!annotation) return;
+    const auto& b = annotation->bounds;
+    cairo_save(cr);
+    cairo_set_source_rgb(cr, 0.20, 0.52, 0.95);
+    cairo_set_line_width(cr, 2.0);
+    const double dash[] = {5.0, 4.0};
+    cairo_set_dash(cr, dash, 2, 0);
+    cairo_rectangle(cr, x + b.x * w->zoom_, y + b.y * w->zoom_,
+                    b.width * w->zoom_, b.height * w->zoom_);
+    cairo_stroke(cr);
+    cairo_set_dash(cr, nullptr, 0, 0);
+    const double handle = 9.0;
+    cairo_rectangle(cr, x + (b.x + b.width) * w->zoom_ - handle / 2.0,
+                    y + (b.y + b.height) * w->zoom_ - handle / 2.0,
+                    handle, handle);
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0.20, 0.52, 0.95);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+  };
+
+  if (!w->continuous_scroll_) {
+    cairo_surface_t* surface = w->document_->render_page(w->current_page_, w->zoom_, true);
+    if (!surface) return;
+    const int sw = cairo_image_surface_get_width(surface);
+    const int sh = cairo_image_surface_get_height(surface);
+    const double x = std::max(0.0, (width - sw) / 2.0);
+    const double y = std::max(0.0, (height - sh) / 2.0);
+    cairo_set_source_surface(cr, surface, x, y);
+    cairo_paint(cr);
+    cairo_surface_destroy(surface);
+    draw_selection(x, y);
+    return;
   }
+
+  auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
+  const double view_top = std::max(0.0, gtk_adjustment_get_value(adjustment));
+  const double view_bottom = view_top + gtk_adjustment_get_page_size(adjustment) + 1.0;
+  double top = kCanvasMargin;
+  for (std::size_t i = 0; i < w->document_->page_count(); ++i) {
+    const auto& page = w->document_->page(i);
+    const double page_height = page.height_points * w->zoom_;
+    const double bottom = top + page_height;
+    if (bottom >= view_top && top <= view_bottom) {
+      cairo_surface_t* surface = w->document_->render_page(i, w->zoom_, true);
+      if (surface) {
+        const int sw = cairo_image_surface_get_width(surface);
+        const double x = std::max(0.0, (width - sw) / 2.0);
+        cairo_set_source_surface(cr, surface, x, top);
+        cairo_paint(cr);
+        cairo_surface_destroy(surface);
+      }
+    }
+    top = bottom + kPageGap;
+  }
+
+  const auto& current = w->document_->page(w->current_page_);
+  const double current_x = std::max(
+      0.0, (width - current.width_points * w->zoom_) / 2.0);
+  draw_selection(current_x, w->page_top(w->current_page_));
 }
 
 void Window::select_page(std::size_t page, bool scroll_to_bottom) {
-  if (!document_ || page >= document_->page_count() || page == current_page_) return;
-  current_page_ = page;
-  selected_annotation_id_ = 0;
-  gtk_list_box_unselect_all(sidebar_);
-  if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
-    gtk_list_box_select_row(sidebar_, row);
-  render_current();
-  gtk_widget_add_tick_callback(GTK_WIDGET(canvas_scroll_), +[](
-      GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
-    const bool bottom = GPOINTER_TO_INT(data);
-    auto* scroll = GTK_SCROLLED_WINDOW(widget);
-    auto* adjustment = gtk_scrolled_window_get_vadjustment(scroll);
-    const double target = bottom
-        ? std::max(gtk_adjustment_get_lower(adjustment),
-                   gtk_adjustment_get_upper(adjustment) -
-                       gtk_adjustment_get_page_size(adjustment))
-        : gtk_adjustment_get_lower(adjustment);
-    gtk_adjustment_set_value(adjustment, target);
-    return G_SOURCE_REMOVE;
-  }, GINT_TO_POINTER(scroll_to_bottom), nullptr);
+  if (!document_ || page >= document_->page_count()) return;
+  if (!continuous_scroll_ && page == current_page_) return;
+  set_current_page(page);
+  if (!continuous_scroll_) render_current();
+  scroll_to_page(page, scroll_to_bottom);
 }
 
 Point Window::canvas_to_page(double x, double y) const {
-  if (!document_ || current_page_ >= document_->page_count())
+  if (!document_ || document_->page_count() == 0)
     return {x / zoom_, y / zoom_};
-  const auto& page = document_->page(current_page_);
+  const auto index = continuous_scroll_ ? page_at_canvas_y(y) : current_page_;
+  if (index >= document_->page_count()) return {x / zoom_, y / zoom_};
+  const auto& page = document_->page(index);
   const double rendered_width = page.width_points * zoom_;
   const double rendered_height = page.height_points * zoom_;
   const double offset_x = std::max(0.0,
       (gtk_widget_get_width(GTK_WIDGET(canvas_)) - rendered_width) / 2.0);
-  const double offset_y = std::max(0.0,
+  const double offset_y = continuous_scroll_ ? page_top(index) : std::max(0.0,
       (gtk_widget_get_height(GTK_WIDGET(canvas_)) - rendered_height) / 2.0);
   return {(x - offset_x) / zoom_, (y - offset_y) / zoom_};
 }

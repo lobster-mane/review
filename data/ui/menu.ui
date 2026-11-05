@@ -15,6 +15,14 @@
     </section>
     <section>
       <submenu>
+        <attribute name="label">View</attribute>
+        <item><attribute name="label">Continuous Scroll</attribute><attribute name="action">win.continuous-scroll</attribute></item>
+        <item><attribute name="label">Single Page</attribute><attribute name="action">win.single-page</attribute></item>
+        <item><attribute name="label">Fit Width</attribute><attribute name="action">win.fit-width</attribute></item>
+      </submenu>
+    </section>
+    <section>
+      <submenu>
         <attribute name="label">Pages</attribute>
         <item><attribute name="label">Cut</attribute><attribute name="action">win.cut-pages</attribute></item>
         <item><attribute name="label">Copy</attribute><attribute name="action">win.copy-pages</attribute></item>
@@ -26,7 +34,6 @@
         <item><attribute name="label">Convert to Scanned Page</attribute><attribute name="action">win.scan-pages</attribute></item>
         <item><attribute name="label">Secure Crop</attribute><attribute name="action">win.secure-crop</attribute></item>
       </submenu>
-      <item><attribute name="label">Fit Width</attribute><attribute name="action">win.fit-width</attribute></item>
     </section>
     <section>
       <item><attribute name="label">Draw Signature…</attribute><attribute name="action">win.draw-signature</attribute></item>

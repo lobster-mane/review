@@ -15,13 +15,21 @@ meson compile -C build            # or: meson setup build && meson compile -C bu
 ```
 
 On this NixOS checkout `meson`, `ninja`, `g++`, and `qpdf` are not on the
-default PATH; enter the dev shell first with `nix-shell` (see `shell.nix`).
-The shell also sets `GSETTINGS_SCHEMA_DIR`; without it GTK aborts when opening
-a color picker (`org.gtk.gtk4.Settings.ColorChooser` is missing).
-On Ubuntu, install the dependencies listed in `README.md`.
+default PATH, and the flake is packaging-only (no devShell). Use `nix build .#`
+to build and test the package, or start an interactive environment with:
 
-Packaged usage: `nix build .#` or `nix run .#`. The flake is packaging-only
-(no devShell); Nix flakes only see files tracked by git.
+```sh
+nix-shell -p meson ninja pkg-config gcc qpdf gtk4 libadwaita poppler cairo gdk-pixbuf glib
+```
+
+When running a locally built binary, set `GSETTINGS_SCHEMA_DIR` to include
+GTK4's `glib-2.0/schemas` directory; otherwise GTK aborts when opening a color
+picker (`org.gtk.gtk4.Settings.ColorChooser` is missing). The packaged wrapper
+handles this automatically. On Ubuntu, install the dependencies listed in
+`README.md`.
+
+Packaged usage: `nix build .#` or `nix run .#`. Nix flakes only see files
+tracked by git.
 
 Debian package: `dpkg-buildpackage -us -uc -b` (deps in `debian/control`).
 
@@ -54,6 +62,9 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   rules are in `data/meson.build`.
 - Multi-window is one process. The page clipboard and drag state are
   file-scope globals in `review-window.cpp`, shared across windows.
+- Continuous mode renders all pages in one drawing area. `page_top` and
+  `page_at_canvas_y` are the layout source of truth; keep drawing, drag
+  mapping, and scroll sync consistent with them.
 
 ## PDF and editing constraints
 

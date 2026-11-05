@@ -11,7 +11,7 @@ full office suite. It is licensed under [GPL-3.0-or-later](LICENSE).
 ## Features
 
 - Read PDFs and common image formats.
-- Scroll continuously through PDF pages.
+- Scroll continuously through PDF pages, or view one page at a time.
 - Highlight text and add text, freehand ink, rectangles, ellipses, and arrows.
 - Draw a reusable signature, or import a photo of one.
 - Move, resize, recolor, or delete annotations; save editable or flattened copies.
@@ -46,7 +46,7 @@ nix profile install .#
 ```
 
 The flake supplies the GTK schemas, MIME data, and `qpdf` that Review needs at
-runtime. For development on NixOS, use `nix-shell` with `shell.nix` instead.
+runtime. See [Development](#development) to build from source.
 
 ## Getting started
 
@@ -56,9 +56,11 @@ runtime. For development on NixOS, use `nix-shell` with `shell.nix` instead.
 4. Use the toolbar to annotate, sign, or crop.
 5. Choose **Save** to update the file or **Save As…** to create a copy.
 
-Scroll down at the bottom of a page to open the next page, or up at the top to
+Choose **View → Continuous Scroll** (`Ctrl+1`) for a long scrolling view, or
+**View → Single Page** (`Ctrl+2`) for one page at a time. In single-page mode,
+scroll down at the bottom of a page to open the next page, or up at the top to
 open the previous one. The sidebar selection and page counter follow the visible
-page.
+page. Review remembers the last view mode for new windows.
 
 ## Signatures
 
@@ -133,6 +135,8 @@ view-only mode. PDF forms are displayed but cannot be edited in Review 0.1.
 | Undo | `Ctrl+Z` |
 | Redo | `Ctrl+Shift+Z` |
 | Copy / cut / paste pages | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Continuous scroll | `Ctrl+1` |
+| Single page | `Ctrl+2` |
 | Zoom in / out | `Ctrl++` / `Ctrl+-` |
 | Print | `Ctrl+P` |
 | New window | `Ctrl+N` |
@@ -167,8 +171,15 @@ meson test -C build --print-errorlogs
 ./build/src/review
 ```
 
-On NixOS, enter `nix-shell` (see `shell.nix`) for Meson, Ninja, the compiler,
-and `qpdf`. The flake is packaging-only; use the shell for development.
+On NixOS, `nix build .#` builds the package and runs the tests. The flake has
+no development shell. For an interactive build, use:
+
+```sh
+nix-shell -p meson ninja pkg-config gcc qpdf gtk4 libadwaita poppler cairo gdk-pixbuf glib
+```
+
+When running a locally built binary, add GTK4's schema directory to
+`GSETTINGS_SCHEMA_DIR` so the color picker works.
 
 ### Build the Debian package
 
