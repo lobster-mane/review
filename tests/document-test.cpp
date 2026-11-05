@@ -197,11 +197,13 @@ void highlight_uses_text_layout() {
   review::Document doc;
   std::string error;
   g_assert_true(doc.open(path, error));
-  const auto rects = doc.highlight_rects(0, {20, 70, 240, 60});
+  const auto rects = doc.highlight_rects(0, {30, 90}, {250, 90});
   g_assert_cmpuint(rects.size(), >=, 1);
   g_assert_cmpfloat(rects.front().width, >, 0);
   g_assert_cmpfloat(rects.front().height, >, 0);
-  g_assert_true(doc.highlight_rects(0, {0, 160, 300, 30}).empty());
+  const auto reversed = doc.highlight_rects(0, {250, 90}, {30, 90});
+  g_assert_cmpuint(reversed.size(), ==, rects.size());
+  g_assert_cmpfloat(reversed.front().width, ==, rects.front().width);
   g_unlink(path.c_str());
 }
 

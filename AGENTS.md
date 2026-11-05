@@ -56,7 +56,9 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   sidebar, canvas gestures, and dialogs.
 - `src/signature-store.*` — reusable signatures under
   `$XDG_DATA_HOME/review/signatures`; preferences and recents live under
-  `$XDG_CONFIG_HOME/review` / `$XDG_DATA_HOME/review`.
+  `$XDG_CONFIG_HOME/review` / `$XDG_DATA_HOME/review`. The toolbar's signature
+  menu is rebuilt by `rebuild_signature_menu()` and places entries through
+  `insert_signature()`.
 - `data/` — `io.github.mika.Review.gresource.xml` is compiled into the binary.
   Add new `data/ui` or `data/icons/scalable/actions` resources there; install
   rules are in `data/meson.build`.
@@ -70,9 +72,10 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Dragging an annotation across a page boundary in continuous mode transfers it
   with `Document::move_annotation()`; keep the source/target page offsets in
   sync with `page_top` and the centered page x offset.
-- The highlight tool is a text selector. `Document::highlight_rects()` returns
-  per-line rectangles from Poppler's text layout; they are stored in
-  `Annotation::text_rects` and written as multiple highlight quads.
+- The highlight tool is a text selector. `Document::highlight_rects()` maps the
+  drag start/end points to continuous character ranges in Poppler's text
+  layout, groups them into per-line rectangles, stores them in
+  `Annotation::text_rects`, and writes them as multiple highlight quads.
 - Per-tool stroke/fill defaults live in `Window::tool_colors_`; the marker
   (highlight) defaults to translucent yellow and other tools to black with a
   transparent fill. Color controls are shown through `property_revealer_`.

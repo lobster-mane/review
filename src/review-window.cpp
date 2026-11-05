@@ -535,22 +535,33 @@ void Window::build_ui() {
   updating_annotation_controls_ = false;
   update_text_format_visibility();
 
-  auto* signature = icon_button("review-signature-symbolic", "Insert saved signature");
-  g_signal_connect_swapped(signature, "clicked", G_CALLBACK((+[](Window* w) {
-    if (!w->document_ || w->signatures_.signatures().empty()) {
-      w->draw_signature_dialog();
-      return;
-    }
-    const auto& page = w->document_->page(w->current_page_);
-    Annotation a;
-    a.type = AnnotationType::Signature;
-    a.signature_path = w->signatures_.signatures().front().path;
-    a.bounds = {page.width_points * .25, page.height_points * .4,
-                page.width_points * .5, page.height_points * .12};
-    w->document_->add_annotation(w->current_page_, std::move(a));
-    w->render_current();
-  })), this);
-  append_button(tool_row, signature);
+  signature_button_ = GTK_MENU_BUTTON(gtk_menu_button_new());
+  gtk_menu_button_set_icon_name(signature_button_, "review-signature-symbolic");
+  gtk_widget_add_css_class(GTK_WIDGET(signature_button_), "flat");
+  gtk_widget_set_tooltip_text(GTK_WIDGET(signature_button_),
+                              "Insert a saved signature");
+  auto* signature_popover = gtk_popover_new();
+  gtk_popover_set_has_arrow(GTK_POPOVER(signature_popover), TRUE);
+  auto* signature_scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(signature_scroll),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_max_content_height(
+      GTK_SCROLLED_WINDOW(signature_scroll), 420);
+  gtk_scrolled_window_set_propagate_natural_height(
+      GTK_SCROLLED_WINDOW(signature_scroll), TRUE);
+  gtk_scrolled_window_set_propagate_natural_width(
+      GTK_SCROLLED_WINDOW(signature_scroll), TRUE);
+  signature_box_ = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 6));
+  gtk_widget_set_margin_start(GTK_WIDGET(signature_box_), 8);
+  gtk_widget_set_margin_end(GTK_WIDGET(signature_box_), 8);
+  gtk_widget_set_margin_top(GTK_WIDGET(signature_box_), 8);
+  gtk_widget_set_margin_bottom(GTK_WIDGET(signature_box_), 8);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(signature_scroll),
+                                GTK_WIDGET(signature_box_));
+  gtk_popover_set_child(GTK_POPOVER(signature_popover), signature_scroll);
+  gtk_menu_button_set_popover(signature_button_, signature_popover);
+  append_button(tool_row, GTK_WIDGET(signature_button_));
+  rebuild_signature_menu();
 
   auto* crop = icon_button("review-crop-symbolic", "Secure crop");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(crop), "win.secure-crop");
@@ -584,6 +595,15 @@ void Window::build_ui() {
   gtk_list_box_set_activate_on_single_click(sidebar_, TRUE);
   gtk_scrolled_window_set_child(sidebar_scroll, GTK_WIDGET(sidebar_));
   gtk_paned_set_start_child(split_, GTK_WIDGET(sidebar_scroll));
+  auto* modifier_tracker = gtk_event_controller_legacy_new();
+  g_signal_connect(modifier_tracker, "event", G_CALLBACK(+[](
+      GtkEventControllerLegacy*, GdkEvent* event, gpointer data) -> gboolean {
+    auto* w = self(data);
+    if (gdk_event_get_event_type(event) == GDK_BUTTON_PRESS)
+      w->sidebar_modifiers_ = gdk_event_get_modifier_state(event);
+    return GDK_EVENT_PROPAGATE;
+  }), this);
+  gtk_widget_add_controller(GTK_WIDGET(sidebar_), modifier_tracker);
   g_signal_connect_swapped(sidebar_, "row-activated", G_CALLBACK(+[](
       Window* w, GtkListBoxRow* row) {
     if (!row) return;
@@ -596,11 +616,23 @@ void Window::build_ui() {
       GtkListBox*, GtkListBoxRow* row, gpointer data) {
     auto* w = self(data);
     if (w->syncing_sidebar_ || !row || !w->document_) return;
+    const bool modifier =
+        (w->sidebar_modifiers_ & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) != 0;
+    if (!modifier) {
+      GList* selected = gtk_list_box_get_selected_rows(w->sidebar_);
+      if (selected && selected->next) {
+        w->syncing_sidebar_ = true;
+        gtk_list_box_unselect_all(w->sidebar_);
+        gtk_list_box_select_row(w->sidebar_, row);
+        w->syncing_sidebar_ = false;
+      }
+      g_list_free(selected);
+    }
     GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
     const bool single = rows && !rows->next;
     const auto page = row_index(row);
     g_list_free(rows);
-    if (single) w->select_page(page);
+    if (single && !modifier) w->select_page(page);
     w->update_page_status();
   }), this);
   auto* file_drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
@@ -1498,9 +1530,12 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
                 std::min(w->drag_start_.y, w->drag_current_.y),
                 std::abs(w->drag_current_.x - w->drag_start_.x),
                 std::abs(w->drag_current_.y - w->drag_start_.y)};
-    if ((type == AnnotationType::Rectangle || type == AnnotationType::Ellipse ||
-         type == AnnotationType::Highlight) &&
+    if ((type == AnnotationType::Rectangle || type == AnnotationType::Ellipse) &&
         (bounds.width < 0.5 || bounds.height < 0.5))
+      return;
+    if (type == AnnotationType::Highlight &&
+        std::hypot(w->drag_current_.x - w->drag_start_.x,
+                   w->drag_current_.y - w->drag_start_.y) < 0.5)
       return;
     cairo_save(cr);
     cairo_translate(cr, offset_x, offset_y);
@@ -1511,7 +1546,8 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     switch (type) {
       case AnnotationType::Highlight: {
         cairo_set_source_rgba(cr, fill.red, fill.green, fill.blue, fill.alpha);
-        const auto rects = w->document_->highlight_rects(w->current_page_, bounds);
+        const auto rects = w->document_->highlight_rects(
+            w->current_page_, w->drag_start_, w->drag_current_);
         for (const auto& rect : rects) {
           cairo_rectangle(cr, rect.x, rect.y, rect.width, rect.height);
           cairo_fill(cr);
@@ -2352,6 +2388,79 @@ void Window::choose_import_pdf() {
   g_object_unref(dialog);
 }
 
+void Window::rebuild_signature_menu() {
+  if (!signature_box_) return;
+  GtkWidget* child = gtk_widget_get_first_child(GTK_WIDGET(signature_box_));
+  while (child) {
+    GtkWidget* next = gtk_widget_get_next_sibling(child);
+    gtk_box_remove(signature_box_, child);
+    child = next;
+  }
+
+  const auto& signatures = signatures_.signatures();
+  if (signatures.empty()) {
+    auto* empty = gtk_label_new("No saved signatures");
+    gtk_widget_add_css_class(empty, "dim-label");
+    gtk_widget_set_margin_top(empty, 6);
+    gtk_widget_set_margin_bottom(empty, 6);
+    gtk_box_append(signature_box_, empty);
+  }
+  for (const auto& info : signatures) {
+    auto* button = gtk_button_new();
+    gtk_widget_add_css_class(button, "flat");
+    auto* content = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2));
+    auto* picture = gtk_picture_new_for_filename(info.path.c_str());
+    gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
+    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_CONTAIN);
+    gtk_widget_set_size_request(picture, 220, 64);
+    gtk_widget_add_css_class(picture, "signature-preview");
+    gtk_box_append(content, picture);
+    auto* label = gtk_label_new(info.name.c_str());
+    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_box_append(content, label);
+    gtk_button_set_child(GTK_BUTTON(button), GTK_WIDGET(content));
+    g_object_set_data_full(G_OBJECT(button), "signature-path",
+                           g_strdup(info.path.c_str()), g_free);
+    g_signal_connect(button, "clicked", G_CALLBACK(+[](GtkButton* button, gpointer data) {
+      auto* w = self(data);
+      const char* path = static_cast<const char*>(
+          g_object_get_data(G_OBJECT(button), "signature-path"));
+      if (path) w->insert_signature(path);
+      if (w->signature_button_) gtk_menu_button_popdown(w->signature_button_);
+    }), this);
+    gtk_box_append(signature_box_, button);
+  }
+
+  if (!signatures.empty())
+    gtk_box_append(signature_box_, gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+  auto* add = gtk_button_new_with_label("New signature");
+  gtk_button_set_icon_name(GTK_BUTTON(add), "list-add-symbolic");
+  gtk_widget_add_css_class(add, "flat");
+  g_signal_connect_swapped(add, "clicked", G_CALLBACK(+[](Window* w) {
+    if (w->signature_button_) gtk_menu_button_popdown(w->signature_button_);
+    w->draw_signature_dialog();
+  }), this);
+  gtk_box_append(signature_box_, add);
+}
+
+void Window::insert_signature(const std::string& path) {
+  if (!document_ || current_page_ >= document_->page_count()) return;
+  if (document_->read_only()) {
+    toast("This document is view-only");
+    return;
+  }
+  if (inline_edit_active_) finish_inline_text_edit(true);
+  const auto& page = document_->page(current_page_);
+  Annotation annotation;
+  annotation.type = AnnotationType::Signature;
+  annotation.signature_path = path;
+  annotation.bounds = {page.width_points * .25, page.height_points * .4,
+                       page.width_points * .5, page.height_points * .12};
+  document_->add_annotation(current_page_, std::move(annotation));
+  render_current();
+  update_title();
+}
+
 void Window::choose_signature_image() {
   auto* dialog = gtk_file_dialog_new();
   gtk_file_dialog_set_title(dialog, "Import signature image");
@@ -2360,7 +2469,7 @@ void Window::choose_signature_image() {
       auto*w=self(data);GError*e=nullptr;GFile*f=gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source),result,&e);
       if(!f){if(e)g_error_free(e);return;}char*path=g_file_get_path(f);std::string error;
       if(!w->signatures_.import_image(path,"Signature",80,error))w->show_error("Signature import failed",error);
-      else w->toast("Signature saved. Select the signature tool again to place it.");
+      else { w->rebuild_signature_menu(); w->toast("Signature saved to the signature menu"); }
       g_free(path);g_object_unref(f);
     },this);
   g_object_unref(dialog);
@@ -2418,7 +2527,10 @@ void Window::draw_signature_dialog() {
       std::string error;
       if (!w->signatures_.save_surface(surface, "Signature", error))
         w->show_error("Unable to save signature", error);
-      else w->toast("Signature saved. Select the signature tool to place it.");
+      else {
+        w->rebuild_signature_menu();
+        w->toast("Signature saved to the signature menu");
+      }
       cairo_surface_destroy(surface);
     }
     gtk_window_destroy(GTK_WINDOW(dialog));
@@ -2564,7 +2676,8 @@ void Window::finish_canvas_drag(double x, double y) {
   }
   if (!tool_active_) return;
   if (active_tool_ == AnnotationType::Highlight) {
-    const auto rects = document_->highlight_rects(current_page_, bounds);
+    if (std::hypot(end.x - drag_start_.x, end.y - drag_start_.y) < 0.5) return;
+    const auto rects = document_->highlight_rects(current_page_, drag_start_, end);
     if (rects.empty()) {
       toast("No text selected");
       return;

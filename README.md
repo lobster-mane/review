@@ -69,8 +69,10 @@ Draw a signature once with **Draw Signature…**, or import an image with
 **Import Signature…**. Review removes the near-white background from imported
 images; dark ink on clean, evenly lit white paper works best.
 
-Select the signature button in the annotation toolbar to place a saved signature,
-then use the selection tool to move or resize it.
+Select the signature button in the annotation toolbar to open a menu of saved
+signatures with previews. Choose one to place it, then use the selection tool to
+move or resize it. Use the **+** button below the previews to draw another
+signature.
 
 Signatures are stored per user under `$XDG_DATA_HOME/review/signatures`, normally
 `~/.local/share/review/signatures`. Review restricts these files to the owner but
@@ -89,10 +91,11 @@ continuous view moves it to that page instead of losing it.
 
 Use the **selection tool** to select an annotation, move or resize it, or change
 its colors and opacity. Press `Delete` to remove the selected annotation. The
-**highlight tool** selects text and highlights the lines under the dragged
-area instead of drawing a rectangle. Color controls appear only for tools that
-use them; the marker defaults to translucent yellow while other tools default
-to a black outline with a transparent fill.
+**highlight tool** selects a continuous passage of text between the drag start
+and end points, like text selection in an editor, instead of highlighting the
+area inside a rectangle. Color controls appear only for tools that use them;
+the marker defaults to translucent yellow while other tools default to a black
+outline with a transparent fill.
 
 With the text tool, click the page to create a small text box, or drag to size
 it; the box outline is shown while dragging. Double-click a text annotation to

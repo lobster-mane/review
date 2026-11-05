@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <system_error>
@@ -219,11 +220,21 @@ void paint_pixbuf(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y,
     auto* out = reinterpret_cast<std::uint32_t*>(destination + py * destination_stride);
     const auto* in = source + py * source_stride;
     for (int px = 0; px < pw; ++px) {
-      const unsigned alpha = channels == 4 ? in[px * channels + 3] : 255;
-      const unsigned red = in[px * channels] * alpha / 255;
-      const unsigned green = in[px * channels + 1] * alpha / 255;
-      const unsigned blue = in[px * channels + 2] * alpha / 255;
-      out[px] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+      unsigned red = 0;
+      unsigned green = 0;
+      unsigned blue = 0;
+      unsigned alpha = 255;
+      if (channels == 1 || channels == 2) {
+        red = green = blue = in[px * channels];
+        if (channels == 2) alpha = in[px * channels + 1];
+      } else {
+        red = in[px * channels];
+        green = in[px * channels + 1];
+        blue = in[px * channels + 2];
+        if (channels == 4) alpha = in[px * channels + 3];
+      }
+      out[px] = ((alpha * red / 255) << 16) | ((alpha * green / 255) << 8) |
+                (alpha * blue / 255) | (alpha << 24);
     }
   }
   cairo_surface_mark_dirty(surface);
@@ -582,12 +593,12 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale,
   cairo_restore(cr);
 }
 
-std::vector<Rect> Document::highlight_rects(std::size_t index, Rect area) const {
+std::vector<Rect> Document::highlight_rects(std::size_t index, Point start,
+                                           Point end) const {
   std::vector<Rect> result;
   if (index >= pages_.size() || kind_ != Kind::Pdf) return result;
   const auto& ref = pages_[index];
   if (ref.rasterized || ref.secure_crop.active || ref.rotation != 0) return result;
-  if (area.width <= 0.0 || area.height <= 0.0) return result;
 
   std::string ignored;
   PopplerDocument* source = (pdf_ && ref.source_path == path_) ?
@@ -601,7 +612,35 @@ std::vector<Rect> Document::highlight_rects(std::size_t index, Rect area) const 
 
   PopplerRectangle* rectangles = nullptr;
   guint count = 0;
-  if (poppler_page_get_text_layout(page, &rectangles, &count)) {
+  if (poppler_page_get_text_layout(page, &rectangles, &count) && count > 0) {
+    auto nearest_index = [&](Point point) {
+      guint best = 0;
+      double best_score = std::numeric_limits<double>::max();
+      for (guint i = 0; i < count; ++i) {
+        const auto& r = rectangles[i];
+        const double left = std::min(r.x1, r.x2);
+        const double right = std::max(r.x1, r.x2);
+        const double top = std::min(r.y1, r.y2);
+        const double bottom = std::max(r.y1, r.y2);
+        if (right <= left || bottom <= top) continue;
+        const double dx = point.x < left ? left - point.x :
+                          point.x > right ? point.x - right : 0.0;
+        const double dy = point.y < top ? top - point.y :
+                          point.y > bottom ? point.y - bottom : 0.0;
+        // Prefer the nearest text line, then the nearest character on it.
+        const double score = dy * 10000.0 + dx;
+        if (score < best_score) {
+          best_score = score;
+          best = i;
+        }
+      }
+      return best;
+    };
+
+    guint first = nearest_index(start);
+    guint last = nearest_index(end);
+    if (first > last) std::swap(first, last);
+
     struct Line {
       double top{};
       double bottom{};
@@ -609,42 +648,33 @@ std::vector<Rect> Document::highlight_rects(std::size_t index, Rect area) const 
       double right{};
     };
     std::vector<Line> lines;
-    for (guint i = 0; i < count; ++i) {
+    for (guint i = first; i <= last; ++i) {
       const auto& r = rectangles[i];
-      const Rect character{r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1};
-      if (character.width <= 0.0 || character.height <= 0.0) continue;
-      const double overlap_x = std::min(character.x + character.width, area.x + area.width) -
-                               std::max(character.x, area.x);
-      const double overlap_y = std::min(character.y + character.height, area.y + area.height) -
-                               std::max(character.y, area.y);
-      if (overlap_x <= 0.0 || overlap_y <= 0.0) continue;
-      // Ignore a character that the drag only clips at its very edge.
-      if (overlap_x < character.width * 0.15 &&
-          overlap_y < character.height * 0.15)
-        continue;
-
-      const double center = character.y + character.height / 2.0;
-      Line* line = nullptr;
-      for (auto& candidate : lines) {
-        const double candidate_height = candidate.bottom - candidate.top;
-        const double overlap = std::min(candidate.bottom, character.y + character.height) -
-                               std::max(candidate.top, character.y);
-        if (overlap > std::min(candidate_height, character.height) * 0.5 &&
-            std::abs(center - (candidate.top + candidate.bottom) / 2.0) <
-                std::max(candidate_height, character.height) * 0.75) {
-          line = &candidate;
-          break;
+      const double left = std::min(r.x1, r.x2);
+      const double right = std::max(r.x1, r.x2);
+      const double top = std::min(r.y1, r.y2);
+      const double bottom = std::max(r.y1, r.y2);
+      if (right <= left || bottom <= top) continue;
+      bool merged = false;
+      if (!lines.empty()) {
+        auto& line = lines.back();
+        const double line_height = line.bottom - line.top;
+        const double vertical_overlap = std::min(line.bottom, bottom) - std::max(line.top, top);
+        const double horizontal_distance =
+            right < line.left ? line.left - right :
+            left > line.right ? left - line.right : 0.0;
+        const double allowed_gap = std::max(12.0, std::max(line_height, bottom - top) * 2.0);
+        if (vertical_overlap > std::min(line_height, bottom - top) * 0.5 &&
+            horizontal_distance <= allowed_gap) {
+          line.top = std::min(line.top, top);
+          line.bottom = std::max(line.bottom, bottom);
+          line.left = std::min(line.left, left);
+          line.right = std::max(line.right, right);
+          merged = true;
         }
       }
-      if (!line) {
-        lines.push_back({character.y, character.y + character.height,
-                         character.x, character.x + character.width});
-      } else {
-        line->top = std::min(line->top, character.y);
-        line->bottom = std::max(line->bottom, character.y + character.height);
-        line->left = std::min(line->left, character.x);
-        line->right = std::max(line->right, character.x + character.width);
-      }
+      if (!merged)
+        lines.push_back({top, bottom, left, right});
     }
     for (const auto& line : lines) {
       if (line.right > line.left && line.bottom > line.top)

@@ -55,6 +55,8 @@ private:
   void choose_import_pdf();
   void choose_signature_image();
   void draw_signature_dialog();
+  void rebuild_signature_menu();
+  void insert_signature(const std::string& path);
   void add_simple_annotation(AnnotationType type);
   void start_destructive(bool crop);
   void set_tool(AnnotationType type);
@@ -112,6 +114,8 @@ private:
   GtkSearchEntry* search_{};
   GtkToggleButton* active_tool_button_{};
   GtkToggleButton* select_button_{};
+  GtkMenuButton* signature_button_{};
+  GtkBox* signature_box_{};
   GtkColorDialogButton* stroke_color_{};
   GtkColorDialogButton* fill_color_{};
   GtkRevealer* property_revealer_{};
@@ -146,6 +150,7 @@ private:
   double last_fit_reference_{};
   bool continuous_scroll_{false};
   bool syncing_sidebar_{false};
+  GdkModifierType sidebar_modifiers_{};
   int sidebar_position_{180};
   double last_scroll_value_{};
   bool has_last_scroll_value_{};

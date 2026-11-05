@@ -40,7 +40,8 @@ public:
   cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true,
                                std::uint64_t skip_annotation_id = 0) const;
   std::string page_text(std::size_t index) const;
-  [[nodiscard]] std::vector<Rect> highlight_rects(std::size_t index, Rect area) const;
+  [[nodiscard]] std::vector<Rect> highlight_rects(std::size_t index, Point start,
+                                                 Point end) const;
 
   void checkpoint();
   bool undo();
