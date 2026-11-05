@@ -59,7 +59,8 @@ private:
   const Annotation* selected_annotation() const;
   void select_annotation_at(Point point);
   void sync_annotation_controls();
-  void apply_annotation_controls(bool text_and_font);
+  void apply_annotation_controls(bool text_and_font, bool update_text = false);
+  void edit_text_annotation();
   Point canvas_to_page(double x, double y) const;
   void finish_canvas_drag(double x, double y);
 
@@ -80,6 +81,12 @@ private:
   GtkColorDialogButton* stroke_color_{};
   GtkColorDialogButton* fill_color_{};
   GtkFontDialogButton* font_button_{};
+  GtkToggleButton* bold_button_{};
+  GtkToggleButton* italic_button_{};
+  GtkToggleButton* underline_button_{};
+  GtkToggleButton* align_left_button_{};
+  GtkToggleButton* align_center_button_{};
+  GtkToggleButton* align_right_button_{};
   GtkLabel* page_label_{};
   GMenu* recent_menu_{};
   std::unique_ptr<Document> document_{};
@@ -99,6 +106,10 @@ private:
   Color annotation_fill_{1.0, 0.92, 0.23, 0.35};
   std::string annotation_font_{"Sans"};
   double annotation_font_size_{12.0};
+  bool annotation_bold_{};
+  bool annotation_italic_{};
+  bool annotation_underline_{};
+  TextAlign annotation_align_{TextAlign::Left};
   std::uint64_t selected_annotation_id_{};
   bool resizing_annotation_{};
   bool annotation_edit_started_{};

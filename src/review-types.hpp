@@ -38,6 +38,12 @@ enum class AnnotationType {
   Signature,
 };
 
+enum class TextAlign {
+  Left,
+  Center,
+  Right,
+};
+
 struct Annotation {
   std::uint64_t id{};
   AnnotationType type{AnnotationType::Rectangle};
@@ -50,6 +56,10 @@ struct Annotation {
   double stroke_width{2.0};
   std::string font_family{"Sans"};
   double font_size{12.0};
+  bool bold{};
+  bool italic{};
+  bool underline{};
+  TextAlign align{TextAlign::Left};
 };
 
 struct Crop {

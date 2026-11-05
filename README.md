@@ -86,8 +86,12 @@ signature tools. A tool stays active after use, so you can add several
 annotations in a row.
 
 Use the **hand tool** to pan without editing. Use the **selection tool** to
-select an annotation, move or resize it, edit its text, or change its colors and
-opacity. Press `Delete` to remove the selected annotation.
+select an annotation, move or resize it, or change its colors and opacity.
+Press `Delete` to remove the selected annotation.
+
+Double-click a text annotation, or select it and click the pencil button, to
+edit its text in a larger dialog. The toolbar also provides bold, italic,
+underline, alignment, font, size, and color controls for text annotations.
 
 A normal **Save** keeps supported annotations editable in other PDF viewers.
 Choose **Export Flattened Copy…** to paint the visible result permanently into

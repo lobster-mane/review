@@ -65,6 +65,9 @@ void assert_annotation_appearances(const std::string& pdf_path) {
   g_assert_cmpuint(free_text_end, !=, std::string::npos);
   const auto free_text_object = qdf.substr(free_text_start, free_text_end - free_text_start);
   g_assert_nonnull(g_strstr_len(free_text_object.data(), free_text_object.size(), "/AP"));
+  g_assert_nonnull(g_strstr_len(free_text_object.data(), free_text_object.size(),
+                               "/Helvetica-Bold"));
+  g_assert_nonnull(g_strstr_len(free_text_object.data(), free_text_object.size(), "/Q 1"));
   g_unlink(qdf_path.c_str());
 }
 
@@ -116,9 +119,17 @@ void annotation_edit_properties() {
   edited.font_family = "Serif";
   edited.font_size = 18;
   edited.stroke = {0.1, 0.2, 0.8, 1.0};
+  edited.bold = true;
+  edited.italic = true;
+  edited.underline = true;
+  edited.align = review::TextAlign::Center;
   g_assert_true(doc.update_annotation(0, id, edited));
   g_assert_cmpstr(doc.page(0).annotations.front().text.c_str(), ==, "Edited");
   g_assert_cmpstr(doc.page(0).annotations.front().font_family.c_str(), ==, "Serif");
+  g_assert_true(doc.page(0).annotations.front().bold);
+  g_assert_true(doc.page(0).annotations.front().italic);
+  g_assert_true(doc.page(0).annotations.front().underline);
+  g_assert_true(doc.page(0).annotations.front().align == review::TextAlign::Center);
   g_assert_true(doc.undo());
   g_assert_cmpstr(doc.page(0).annotations.front().text.c_str(), ==, "Original");
 
@@ -175,6 +186,9 @@ void save_annotations() {
   text.font_family = "Sans";
   text.font_size = 32;
   text.stroke = {0.1, 0.2, 0.75, 1.0};
+  text.bold = true;
+  text.underline = true;
+  text.align = review::TextAlign::Center;
   doc.add_annotation(0, text);
   const auto saved_text = doc.page(0).annotations.back();
   g_assert_cmpfloat(saved_text.bounds.width, >, text.bounds.width);

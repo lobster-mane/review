@@ -61,13 +61,18 @@ bool run_process(const std::vector<std::string>& args, std::string& error) {
   return true;
 }
 
+void select_annotation_font(cairo_t* cr, const Annotation& annotation) {
+  cairo_select_font_face(
+      cr, annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str(),
+      annotation.italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL,
+      annotation.bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+}
+
 Rect fit_text_bounds(const Annotation& annotation) {
   Rect fitted = annotation.bounds;
   auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
   auto* cr = cairo_create(surface);
-  cairo_select_font_face(cr,
-                         annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str(),
-                         CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  select_annotation_font(cr, annotation);
   cairo_set_font_size(cr, annotation.font_size);
   cairo_font_extents_t font{};
   cairo_font_extents(cr, &font);
@@ -120,6 +125,30 @@ std::string pdf_number(double value) {
   return g_ascii_dtostr(buffer, sizeof(buffer), value);
 }
 
+std::string pdf_font_name(const Annotation& annotation) {
+  const bool mono = annotation.font_family.find("Mono") != std::string::npos;
+  const bool serif = annotation.font_family.find("Serif") != std::string::npos;
+  std::string font;
+  if (mono) {
+    font = "Courier";
+    if (annotation.bold && annotation.italic) font += "-BoldOblique";
+    else if (annotation.bold) font += "-Bold";
+    else if (annotation.italic) font += "-Oblique";
+  } else if (serif) {
+    font = "Times";
+    if (annotation.bold && annotation.italic) font += "-BoldItalic";
+    else if (annotation.bold) font += "-Bold";
+    else if (annotation.italic) font += "-Italic";
+    else font += "-Roman";
+  } else {
+    font = "Helvetica";
+    if (annotation.bold && annotation.italic) font += "-BoldOblique";
+    else if (annotation.bold) font += "-Bold";
+    else if (annotation.italic) font += "-Oblique";
+  }
+  return "/" + font;
+}
+
 bool convert_saved_free_text(const std::string& path,
                              const std::vector<PageRef>& pages,
                              std::string& error) {
@@ -170,14 +199,14 @@ bool convert_saved_free_text(const std::string& path,
                   "/Contents " + pdf_utf16_string(annotation.text));
       subtype = qdf.find("/Subtype /Stamp", contents);
       qdf.replace(subtype, std::strlen("/Subtype /Stamp"), "/Subtype /FreeText");
-      const auto font = annotation.font_family.find("Mono") != std::string::npos ? "/Courier" :
-                        annotation.font_family.find("Serif") != std::string::npos ? "/Times-Roman" :
-                                                                                   "/Helvetica";
-      const auto appearance = std::string("\n  /DA (") + font + " " +
+      const int alignment = annotation.align == TextAlign::Center ? 1 :
+                            annotation.align == TextAlign::Right ? 2 : 0;
+      const auto appearance = std::string("\n  /DA (") + pdf_font_name(annotation) + " " +
                               pdf_number(annotation.font_size) +
                               " Tf " + pdf_number(annotation.stroke.red) + " " +
                               pdf_number(annotation.stroke.green) + " " +
-                              pdf_number(annotation.stroke.blue) + " rg)\n  /Q 0";
+                              pdf_number(annotation.stroke.blue) + " rg)\n  /Q " +
+                              std::to_string(alignment);
       qdf.insert(subtype + std::strlen("/Subtype /FreeText"), appearance);
     }
   }
@@ -544,8 +573,7 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale) c
         }
         break;
       case AnnotationType::TextBox:
-        cairo_select_font_face(cr, a.font_family.empty() ? "Sans" : a.font_family.c_str(),
-                               CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        select_annotation_font(cr, a);
         cairo_set_font_size(cr, a.font_size);
         {
           cairo_font_extents_t font{};
@@ -554,10 +582,25 @@ void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale) c
           std::string line;
           std::size_t line_number = 0;
           while (std::getline(input, line)) {
-            cairo_move_to(cr, b.x + 4,
-                          b.y + 4 + font.ascent +
-                              line_number * std::max(font.height, a.font_size));
+            cairo_text_extents_t extents{};
+            cairo_text_extents(cr, line.c_str(), &extents);
+            double x = b.x + 4.0;
+            if (a.align == TextAlign::Center)
+              x = b.x + (b.width - extents.x_advance) / 2.0;
+            else if (a.align == TextAlign::Right)
+              x = b.x + b.width - 4.0 - extents.x_advance;
+            const double baseline = b.y + 4.0 + font.ascent +
+                line_number * std::max(font.height, a.font_size);
+            cairo_move_to(cr, x, baseline);
             cairo_show_text(cr, line.c_str());
+            if (a.underline) {
+              cairo_set_line_width(cr, std::max(1.0, a.font_size / 14.0));
+              cairo_move_to(cr, x, baseline + std::max(1.0, font.descent * 0.35));
+              cairo_line_to(cr, x + extents.x_advance,
+                            baseline + std::max(1.0, font.descent * 0.35));
+              cairo_stroke(cr);
+              cairo_set_line_width(cr, a.stroke_width);
+            }
             ++line_number;
           }
         }
