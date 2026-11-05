@@ -264,7 +264,7 @@ void Window::build_ui() {
 
   const struct { const char* icon; const char* tip; AnnotationType type; } tools[] = {
     {"review-highlight-symbolic", "Highlight", AnnotationType::Highlight},
-    {"review-text-symbolic", "Text box", AnnotationType::TextBox},
+    {"review-text-symbolic", "Text box (drag, then type)", AnnotationType::TextBox},
     {"review-ink-symbolic", "Freehand ink", AnnotationType::Ink},
     {"review-rectangle-symbolic", "Rectangle", AnnotationType::Rectangle},
     {"review-ellipse-symbolic", "Ellipse", AnnotationType::Ellipse},
@@ -303,25 +303,10 @@ void Window::build_ui() {
   };
 
   auto* hand_button = add_tool_button("review-hand-symbolic", "Hand tool (pan without annotating)", -2);
-  add_tool_button("review-select-symbolic", "Select, move, and resize annotations", -1);
+  select_button_ = add_tool_button("review-select-symbolic", "Select, move, and resize annotations", -1);
   for (const auto& tool : tools) {
     add_tool_button(tool.icon, tool.tip, static_cast<int>(tool.type));
   }
-  annotation_text_ = GTK_ENTRY(gtk_entry_new());
-  gtk_editable_set_text(GTK_EDITABLE(annotation_text_), "Text");
-  gtk_entry_set_placeholder_text(annotation_text_, "Annotation text");
-  gtk_widget_set_size_request(GTK_WIDGET(annotation_text_), 150, -1);
-  gtk_widget_set_tooltip_text(GTK_WIDGET(annotation_text_),
-                              "Text for new annotation; press Enter to update selected text");
-  g_signal_connect_swapped(annotation_text_, "activate", G_CALLBACK(+[](Window* w) {
-    w->apply_annotation_controls(true, true);
-  }), this);
-  g_signal_connect_swapped(annotation_text_, "notify::has-focus", G_CALLBACK(+[](Window* w) {
-    if (!w->updating_annotation_controls_ &&
-        !gtk_widget_has_focus(GTK_WIDGET(w->annotation_text_)))
-      w->apply_annotation_controls(true, true);
-  }), this);
-  append_button(property_row, GTK_WIDGET(annotation_text_));
 
   auto* stroke_dialog = gtk_color_dialog_new();
   gtk_color_dialog_set_title(stroke_dialog, "Choose outline and text color");
@@ -493,7 +478,59 @@ void Window::build_ui() {
   gtk_widget_add_css_class(GTK_WIDGET(canvas_), "page-canvas");
   gtk_widget_set_cursor_from_name(GTK_WIDGET(canvas_), "grab");
   gtk_drawing_area_set_draw_func(canvas_, draw_page, this, nullptr);
-  gtk_scrolled_window_set_child(canvas_scroll_, GTK_WIDGET(canvas_));
+  canvas_overlay_ = GTK_OVERLAY(gtk_overlay_new());
+  gtk_overlay_set_child(canvas_overlay_, GTK_WIDGET(canvas_));
+  inline_editor_ = gtk_scrolled_window_new();
+  gtk_widget_add_css_class(inline_editor_, "inline-text-editor");
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(inline_editor_),
+                                 GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  inline_text_view_ = GTK_TEXT_VIEW(gtk_text_view_new());
+  gtk_widget_add_css_class(GTK_WIDGET(inline_text_view_), "inline-text-editor-view");
+  gtk_text_view_set_wrap_mode(inline_text_view_, GTK_WRAP_WORD_CHAR);
+  gtk_text_view_set_accepts_tab(inline_text_view_, FALSE);
+  gtk_text_view_set_left_margin(inline_text_view_, 4);
+  gtk_text_view_set_right_margin(inline_text_view_, 4);
+  gtk_text_view_set_top_margin(inline_text_view_, 4);
+  gtk_text_view_set_bottom_margin(inline_text_view_, 4);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(inline_editor_),
+                                GTK_WIDGET(inline_text_view_));
+  gtk_overlay_add_overlay(canvas_overlay_, inline_editor_);
+  gtk_widget_set_halign(inline_editor_, GTK_ALIGN_START);
+  gtk_widget_set_valign(inline_editor_, GTK_ALIGN_START);
+  gtk_widget_set_visible(inline_editor_, FALSE);
+  g_signal_connect(gtk_text_view_get_buffer(inline_text_view_), "changed",
+                   G_CALLBACK(+[](GtkTextBuffer*, gpointer data) {
+                     auto* w = self(data);
+                     if (w->inline_edit_active_) w->apply_inline_text_style();
+                   }), this);
+  auto* editor_keys = gtk_event_controller_key_new();
+  gtk_event_controller_set_propagation_phase(editor_keys, GTK_PHASE_CAPTURE);
+  g_signal_connect(editor_keys, "key-pressed", G_CALLBACK(+[](
+      GtkEventControllerKey*, guint keyval, guint, GdkModifierType state,
+      gpointer data) -> gboolean {
+    auto* w = self(data);
+    if (!w->inline_edit_active_) return FALSE;
+    if (keyval == GDK_KEY_Escape) {
+      w->finish_inline_text_edit(false);
+      return TRUE;
+    }
+    if (keyval == GDK_KEY_Return && (state & GDK_CONTROL_MASK)) {
+      w->finish_inline_text_edit(true);
+      return TRUE;
+    }
+    return FALSE;
+  }), this);
+  gtk_widget_add_controller(GTK_WIDGET(inline_text_view_), editor_keys);
+  auto* editor_focus = gtk_event_controller_focus_new();
+  g_signal_connect(editor_focus, "leave", G_CALLBACK(+[](
+      GtkEventControllerFocus*, gpointer data) {
+    auto* w = self(data);
+    if (w->inline_edit_active_ && !w->finishing_inline_edit_)
+      w->finish_inline_text_edit(true);
+  }), this);
+  gtk_widget_add_controller(GTK_WIDGET(inline_text_view_),
+                            GTK_EVENT_CONTROLLER(editor_focus));
+  gtk_scrolled_window_set_child(canvas_scroll_, GTK_WIDGET(canvas_overlay_));
   g_signal_connect(gtk_scrolled_window_get_vadjustment(canvas_scroll_), "value-changed",
                    G_CALLBACK(+[](GtkAdjustment*, gpointer data) {
                      self(data)->update_current_page_from_scroll();
@@ -578,6 +615,7 @@ void Window::build_ui() {
       GtkGestureDrag* gesture, double x, double y, gpointer data) {
     auto* w = self(data);
     if (!w->document_) return;
+    if (w->inline_edit_active_) w->finish_inline_text_edit(true);
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
     if (w->continuous_scroll_) w->set_current_page(w->page_at_canvas_y(y));
     w->drag_start_ = w->canvas_to_page(x, y);
@@ -765,9 +803,9 @@ void Window::install_actions() {
     {"single-page", nullptr, nullptr, "true", +[](GSimpleAction*, GVariant*, gpointer d){
       self(d)->set_continuous_scroll(false);
     }, {}},
-    {"zoom-in", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=false;w->zoom_=std::min(5.0,w->zoom_*1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
-    {"zoom-out", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=false;w->zoom_=std::max(.15,w->zoom_/1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
-    {"fit-width", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);w->fit_width_=true;w->render_current(); }, nullptr, nullptr, nullptr, {}},
+    {"zoom-in", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);if(w->inline_edit_active_)w->finish_inline_text_edit(true);w->fit_width_=false;w->zoom_=std::min(5.0,w->zoom_*1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
+    {"zoom-out", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);if(w->inline_edit_active_)w->finish_inline_text_edit(true);w->fit_width_=false;w->zoom_=std::max(.15,w->zoom_/1.2);w->render_current(); }, nullptr, nullptr, nullptr, {}},
+    {"fit-width", +[](GSimpleAction*, GVariant*, gpointer d){ auto*w=self(d);if(w->inline_edit_active_)w->finish_inline_text_edit(true);w->fit_width_=true;w->render_current(); }, nullptr, nullptr, nullptr, {}},
     {"print", +[](GSimpleAction*, GVariant*, gpointer d){
       auto*w=self(d); if(!w->document_)return;
       gchar* argv[]={const_cast<gchar*>("lp"),const_cast<gchar*>(w->document_->path().c_str()),nullptr};GError*e=nullptr;
@@ -882,6 +920,7 @@ void Window::rebuild_recent_menu() {
 }
 
 void Window::refresh() {
+  if (inline_edit_active_) finish_inline_text_edit(true);
   rebuild_sidebar();
   if (document_ && current_page_ >= document_->page_count())
     current_page_ = document_->page_count() - 1;
@@ -1132,6 +1171,7 @@ void Window::update_view_actions() {
 }
 
 void Window::set_continuous_scroll(bool enabled) {
+  if (inline_edit_active_) finish_inline_text_edit(true);
   if (enabled == continuous_scroll_) {
     update_view_actions();
     return;
@@ -1222,6 +1262,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
 
 void Window::select_page(std::size_t page, bool scroll_to_bottom) {
   if (!document_ || page >= document_->page_count()) return;
+  if (inline_edit_active_) finish_inline_text_edit(true);
   if (!continuous_scroll_ && page == current_page_) return;
   set_current_page(page);
   if (!continuous_scroll_) render_current();
@@ -1291,7 +1332,6 @@ void Window::sync_annotation_controls() {
   gtk_color_dialog_button_set_rgba(stroke_color_, &stroke);
   gtk_color_dialog_button_set_rgba(fill_color_, &fill);
   if (annotation->type == AnnotationType::TextBox) {
-    gtk_editable_set_text(GTK_EDITABLE(annotation_text_), annotation->text.c_str());
     const std::string font = (annotation->font_family.empty() ? "Sans" : annotation->font_family) +
                              " " + std::to_string(annotation->font_size);
     auto* description = pango_font_description_from_string(font.c_str());
@@ -1311,7 +1351,7 @@ void Window::sync_annotation_controls() {
   updating_annotation_controls_ = false;
 }
 
-void Window::apply_annotation_controls(bool text_and_font, bool update_text) {
+void Window::apply_annotation_controls(bool text_and_font) {
   const GdkRGBA* stroke = gtk_color_dialog_button_get_rgba(stroke_color_);
   const GdkRGBA* fill = gtk_color_dialog_button_get_rgba(fill_color_);
   if (stroke) annotation_stroke_ = {stroke->red, stroke->green, stroke->blue, stroke->alpha};
@@ -1342,7 +1382,6 @@ void Window::apply_annotation_controls(bool text_and_font, bool update_text) {
   updated.stroke = annotation_stroke_;
   updated.fill = annotation_fill_;
   if (text_and_font && updated.type == AnnotationType::TextBox) {
-    if (update_text) updated.text = gtk_editable_get_text(GTK_EDITABLE(annotation_text_));
     updated.font_family = annotation_font_;
     updated.font_size = annotation_font_size_;
   }
@@ -1364,67 +1403,143 @@ void Window::edit_text_annotation() {
     toast("Select a text annotation first");
     return;
   }
+  start_inline_text_edit(current_page_, annotation->id);
+}
 
-  struct EditRequest {
-    std::size_t page;
-    std::uint64_t id;
-  };
-  auto* request = new EditRequest{current_page_, annotation->id};
-  auto* dialog = adw_message_dialog_new(GTK_WINDOW(window_), "Edit text", nullptr);
-  auto* scroll = gtk_scrolled_window_new();
-  gtk_widget_set_size_request(scroll, 420, 180);
-  auto* view = gtk_text_view_new();
-  gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
-  gtk_text_view_set_accepts_tab(GTK_TEXT_VIEW(view), FALSE);
-  gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 8);
-  gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 8);
-  gtk_text_view_set_top_margin(GTK_TEXT_VIEW(view), 8);
-  gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(view), 8);
-  auto* buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
-  gtk_text_buffer_set_text(buffer, annotation->text.c_str(), -1);
+void Window::start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_new) {
+  if (!document_ || page >= document_->page_count()) return;
+  if (inline_edit_active_) finish_inline_text_edit(true);
+
+  auto& annotations = document_->page(page).annotations;
+  const auto found = std::find_if(annotations.begin(), annotations.end(),
+      [id](const Annotation& a) { return a.id == id; });
+  if (found == annotations.end() || found->type != AnnotationType::TextBox) return;
+
+  if (select_button_) gtk_toggle_button_set_active(select_button_, TRUE);
+  if (page != current_page_) set_current_page(page);
+  selected_annotation_id_ = id;
+  inline_edit_annotation_ = *found;
+  inline_edit_page_ = page;
+  inline_edit_id_ = id;
+  inline_edit_is_new_ = is_new;
+  inline_edit_active_ = true;
+
+  GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
+  gtk_text_buffer_set_text(buffer, found->text.c_str(), -1);
   GtkTextIter end;
   gtk_text_buffer_get_end_iter(buffer, &end);
   gtk_text_buffer_place_cursor(buffer, &end);
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
-  adw_message_dialog_set_extra_child(ADW_MESSAGE_DIALOG(dialog), scroll);
-  adw_message_dialog_add_responses(ADW_MESSAGE_DIALOG(dialog), "cancel", "Cancel",
-                                   "save", "Save", nullptr);
-  adw_message_dialog_set_default_response(ADW_MESSAGE_DIALOG(dialog), "save");
-  g_object_set_data_full(G_OBJECT(dialog), "review-text-edit", request,
-                         [](gpointer data) { delete static_cast<EditRequest*>(data); });
-  g_object_set_data(G_OBJECT(dialog), "review-text-view", view);
-  g_signal_connect(dialog, "response", G_CALLBACK(+[](
-      AdwMessageDialog* dialog, const char* response, gpointer data) {
-    auto* w = self(data);
-    if (g_strcmp0(response, "save") == 0) {
-      auto* request = static_cast<EditRequest*>(
-          g_object_get_data(G_OBJECT(dialog), "review-text-edit"));
-      auto* view = GTK_TEXT_VIEW(g_object_get_data(G_OBJECT(dialog), "review-text-view"));
-      if (request && view && w->document_ &&
-          request->page < w->document_->page_count()) {
-        GtkTextBuffer* buffer = gtk_text_view_get_buffer(view);
-        GtkTextIter start;
-        GtkTextIter end;
-        gtk_text_buffer_get_bounds(buffer, &start, &end);
-        char* text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-        auto& annotations = w->document_->page(request->page).annotations;
-        const auto found = std::find_if(annotations.begin(), annotations.end(),
-            [request](const Annotation& a) { return a.id == request->id; });
-        if (found != annotations.end()) {
-          Annotation updated = *found;
-          updated.text = text ? text : "";
-          w->document_->update_annotation(request->page, request->id, updated);
-          w->render_current();
-          w->update_title();
-          w->sync_annotation_controls();
+  apply_inline_text_style();
+  position_inline_editor();
+  gtk_widget_set_visible(inline_editor_, TRUE);
+  gtk_widget_grab_focus(GTK_WIDGET(inline_text_view_));
+}
+
+void Window::position_inline_editor() {
+  if (!inline_edit_active_ || !document_ ||
+      inline_edit_page_ >= document_->page_count()) return;
+  const auto& page = document_->page(inline_edit_page_);
+  const auto& annotation = inline_edit_annotation_;
+  const double page_width = page.width_points * zoom_;
+  const double page_height = page.height_points * zoom_;
+  const double offset_x = std::max(
+      0.0, (gtk_widget_get_width(GTK_WIDGET(canvas_)) - page_width) / 2.0);
+  const double offset_y = continuous_scroll_ ? page_top(inline_edit_page_) :
+      std::max(0.0, (gtk_widget_get_height(GTK_WIDGET(canvas_)) - page_height) / 2.0);
+  const int x = std::max(0, static_cast<int>(std::floor(
+      offset_x + annotation.bounds.x * zoom_)));
+  const int y = std::max(0, static_cast<int>(std::floor(
+      offset_y + annotation.bounds.y * zoom_)));
+  const int width = std::max(80, static_cast<int>(std::ceil(
+      (annotation.bounds.width + 8.0) * zoom_)));
+  const int height = std::max(32, static_cast<int>(std::ceil(
+      (annotation.bounds.height + 4.0) * zoom_)));
+  gtk_widget_set_margin_start(inline_editor_, x);
+  gtk_widget_set_margin_top(inline_editor_, y);
+  gtk_widget_set_size_request(inline_editor_, width, height);
+}
+
+void Window::apply_inline_text_style() {
+  if (!inline_edit_active_ || !inline_text_view_) return;
+  GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
+  if (!inline_text_tag_)
+    inline_text_tag_ = gtk_text_buffer_create_tag(buffer, "review-inline-text", nullptr);
+  const auto& annotation = inline_edit_annotation_;
+  char color[8];
+  g_snprintf(color, sizeof(color), "#%02x%02x%02x",
+             static_cast<int>(std::clamp(annotation.stroke.red, 0.0, 1.0) * 255),
+             static_cast<int>(std::clamp(annotation.stroke.green, 0.0, 1.0) * 255),
+             static_cast<int>(std::clamp(annotation.stroke.blue, 0.0, 1.0) * 255));
+  g_object_set(inline_text_tag_,
+               "family", annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str(),
+               "size-points", annotation.font_size * zoom_,
+               "weight", annotation.bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL,
+               "style", annotation.italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL,
+               "underline", annotation.underline ? PANGO_UNDERLINE_SINGLE : PANGO_UNDERLINE_NONE,
+               "foreground", color,
+               nullptr);
+  GtkTextIter start;
+  GtkTextIter end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  gtk_text_buffer_remove_all_tags(buffer, &start, &end);
+  gtk_text_buffer_apply_tag(buffer, inline_text_tag_, &start, &end);
+  gtk_text_view_set_justification(
+      inline_text_view_,
+      annotation.align == TextAlign::Center ? GTK_JUSTIFY_CENTER :
+      annotation.align == TextAlign::Right ? GTK_JUSTIFY_RIGHT : GTK_JUSTIFY_LEFT);
+}
+
+void Window::finish_inline_text_edit(bool commit) {
+  if (!inline_edit_active_ || finishing_inline_edit_) return;
+  finishing_inline_edit_ = true;
+  inline_edit_active_ = false;
+  const auto page = inline_edit_page_;
+  const auto id = inline_edit_id_;
+  const bool is_new = inline_edit_is_new_;
+  GtkTextBuffer* buffer = gtk_text_view_get_buffer(inline_text_view_);
+  GtkTextIter start;
+  GtkTextIter end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  char* text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+  gtk_widget_set_visible(inline_editor_, FALSE);
+
+  bool changed = false;
+  if (document_ && page < document_->page_count()) {
+    auto& annotations = document_->page(page).annotations;
+    const auto found = std::find_if(annotations.begin(), annotations.end(),
+        [id](const Annotation& a) { return a.id == id; });
+    if (found != annotations.end()) {
+      const std::string value = text ? text : "";
+      const bool empty = value.find_first_not_of(" \t\r\n") == std::string::npos;
+      if (!commit) {
+        if (is_new) {
+          document_->remove_annotation(page, id);
+          selected_annotation_id_ = 0;
+          changed = true;
         }
-        g_free(text);
+      } else if (empty) {
+        document_->remove_annotation(page, id);
+        selected_annotation_id_ = 0;
+        changed = true;
+      } else if (value != found->text) {
+        Annotation updated = *found;
+        updated.text = value;
+        document_->update_annotation(page, id, updated);
+        changed = true;
       }
     }
-    gtk_window_destroy(GTK_WINDOW(dialog));
-  }), this);
-  gtk_window_present(GTK_WINDOW(dialog));
-  gtk_widget_grab_focus(view);
+  }
+  g_free(text);
+  inline_edit_page_ = 0;
+  inline_edit_id_ = 0;
+  inline_edit_is_new_ = false;
+  inline_edit_annotation_ = {};
+  if (changed) {
+    render_current();
+    update_title();
+    if (selected_annotation_id_) sync_annotation_controls();
+  }
+  finishing_inline_edit_ = false;
 }
 
 std::vector<std::size_t> Window::selected_pages() const {
@@ -1471,6 +1586,7 @@ void Window::choose_open() {
 
 void Window::save(bool save_as) {
   if (!document_) return;
+  if (inline_edit_active_) finish_inline_text_edit(true);
   if (!save_as && document_->destructive_changes() && !warned_destructive_) {
     auto* dialog = adw_message_dialog_new(GTK_WINDOW(window_), "Overwrite the original document?",
       "Secure crop or scanned-page conversion permanently removes PDF content. Save As keeps the original unchanged.");
@@ -1655,8 +1771,8 @@ void Window::finish_canvas_drag(double x, double y) {
     return;
   }
   if (!tool_active_) return;
+  const bool is_text = active_tool_ == AnnotationType::TextBox;
   Annotation a; a.type=active_tool_;a.bounds=bounds;
-  a.text=gtk_editable_get_text(GTK_EDITABLE(annotation_text_));
   a.stroke=annotation_stroke_;a.fill=annotation_fill_;
   a.font_family=annotation_font_;a.font_size=annotation_font_size_;
   a.bold=annotation_bold_;a.italic=annotation_italic_;a.underline=annotation_underline_;
@@ -1665,9 +1781,12 @@ void Window::finish_canvas_drag(double x, double y) {
   else if(active_tool_==AnnotationType::Line||active_tool_==AnnotationType::Arrow)
     a.points={drag_start_,end};
   document_->add_annotation(current_page_,std::move(a));
-  // Keep the chosen annotation tool active so consecutive drags create
-  // consecutive annotations. The toggle button remains visibly pressed.
   render_current();update_title();
+  if (is_text) {
+    const auto& annotations = document_->page(current_page_).annotations;
+    if (!annotations.empty())
+      start_inline_text_edit(current_page_, annotations.back().id, true);
+  }
 }
 
 void Window::add_simple_annotation(AnnotationType type) { set_tool(type); }

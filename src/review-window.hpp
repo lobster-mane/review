@@ -59,8 +59,12 @@ private:
   const Annotation* selected_annotation() const;
   void select_annotation_at(Point point);
   void sync_annotation_controls();
-  void apply_annotation_controls(bool text_and_font, bool update_text = false);
+  void apply_annotation_controls(bool text_and_font);
   void edit_text_annotation();
+  void start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_new = false);
+  void finish_inline_text_edit(bool commit);
+  void position_inline_editor();
+  void apply_inline_text_style();
   Point canvas_to_page(double x, double y) const;
   void finish_canvas_drag(double x, double y);
 
@@ -75,9 +79,13 @@ private:
   GtkListBox* sidebar_{};
   GtkDrawingArea* canvas_{};
   GtkScrolledWindow* canvas_scroll_{};
+  GtkOverlay* canvas_overlay_{};
+  GtkWidget* inline_editor_{};
+  GtkTextView* inline_text_view_{};
+  GtkTextTag* inline_text_tag_{};
   GtkSearchEntry* search_{};
-  GtkEntry* annotation_text_{};
   GtkToggleButton* active_tool_button_{};
+  GtkToggleButton* select_button_{};
   GtkColorDialogButton* stroke_color_{};
   GtkColorDialogButton* fill_color_{};
   GtkFontDialogButton* font_button_{};
@@ -125,6 +133,12 @@ private:
   double edge_scroll_accum_{};
   int edge_scroll_events_{};
   int edge_scroll_direction_{};
+  std::size_t inline_edit_page_{};
+  std::uint64_t inline_edit_id_{};
+  Annotation inline_edit_annotation_{};
+  bool inline_edit_active_{};
+  bool inline_edit_is_new_{};
+  bool finishing_inline_edit_{};
   std::vector<Point> ink_points_{};
   std::vector<Point> signature_points_{};
 };
