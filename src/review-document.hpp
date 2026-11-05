@@ -35,7 +35,8 @@ public:
   [[nodiscard]] bool destructive_changes() const { return destructive_changes_; }
   [[nodiscard]] bool read_only() const { return read_only_; }
 
-  cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true) const;
+  cairo_surface_t* render_page(std::size_t index, double scale, bool annotations = true,
+                               std::uint64_t skip_annotation_id = 0) const;
   std::string page_text(std::size_t index) const;
 
   void checkpoint();
@@ -71,7 +72,8 @@ private:
   PopplerDocument* load_pdf(const std::string& path, std::string& error,
                             const std::string& password = {}) const;
   cairo_surface_t* render_source(const PageRef& ref, double scale) const;
-  void draw_annotations(cairo_t* cr, const PageRef& ref, double scale) const;
+  void draw_annotations(cairo_t* cr, const PageRef& ref, double scale,
+                        std::uint64_t skip_annotation_id = 0) const;
   bool create_image_pdf(const PageRef& ref, const std::string& destination,
                         bool include_annotations, std::string& error) const;
   bool assemble_pdf(const std::string& destination, bool flatten,

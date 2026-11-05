@@ -11,10 +11,9 @@
 }
 
 .inline-text-editor {
-  background: white;
-  border: 1px solid alpha(#1c71d8, .8);
-  border-radius: 3px;
-  box-shadow: 0 2px 8px alpha(black, .3);
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 
 .inline-text-editor-view {

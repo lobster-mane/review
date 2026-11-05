@@ -90,9 +90,10 @@ select an annotation, move or resize it, or change its colors and opacity.
 Press `Delete` to remove the selected annotation.
 
 Double-click a text annotation, or select it and click the pencil button, to
-edit it directly on the page. Click elsewhere or press `Ctrl+Enter` to finish;
-press `Escape` to cancel. The toolbar also provides bold, italic, underline,
-alignment, font, size, and color controls for text annotations.
+edit it directly on the page. The inline editor matches the final page styling,
+and text wraps inside its box instead of overflowing. Click elsewhere or press
+`Ctrl+Enter` to finish; press `Escape` to cancel. The toolbar also provides
+bold, italic, underline, alignment, font, size, and color controls.
 
 A normal **Save** keeps supported annotations editable in other PDF viewers.
 Choose **Export Flattened Copy…** to paint the visible result permanently into

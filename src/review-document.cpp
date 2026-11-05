@@ -475,7 +475,7 @@ cairo_surface_t* Document::render_source(const PageRef& ref, double scale) const
 }
 
 cairo_surface_t* Document::render_page(std::size_t index, double scale,
-                                       bool annotations) const {
+                                       bool annotations, std::uint64_t skip_annotation_id) const {
   if (index >= pages_.size()) return nullptr;
   const PageRef& ref = pages_[index];
   cairo_surface_t* base = render_source(ref, scale);
@@ -501,7 +501,7 @@ cairo_surface_t* Document::render_page(std::size_t index, double scale,
     if (ref.secure_crop.active)
       cairo_translate(cr, -ref.secure_crop.rect.x * scale,
                       -ref.secure_crop.rect.y * scale);
-    draw_annotations(cr, ref, scale);
+    draw_annotations(cr, ref, scale, skip_annotation_id);
     cairo_destroy(cr);
   }
   if (ref.rotation != 0) {
@@ -533,10 +533,12 @@ cairo_surface_t* Document::render_page(std::size_t index, double scale,
   return base;
 }
 
-void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale) const {
+void Document::draw_annotations(cairo_t* cr, const PageRef& ref, double scale,
+                                std::uint64_t skip_annotation_id) const {
   cairo_save(cr);
   cairo_scale(cr, scale, scale);
   for (const auto& a : ref.annotations) {
+    if (a.id == skip_annotation_id) continue;
     cairo_save(cr);
     cairo_set_line_width(cr, a.stroke_width);
     cairo_set_source_rgba(cr, a.stroke.red, a.stroke.green, a.stroke.blue, a.stroke.alpha);
@@ -745,6 +747,10 @@ void Document::begin_annotation_edit() {
 void Document::commit_annotation_edit() {
   if (!annotation_edit_open_) return;
   annotation_edit_open_ = false;
+  for (auto& page : pages_)
+    for (auto& annotation : page.annotations)
+      if (annotation.type == AnnotationType::TextBox)
+        annotation.bounds = fit_text_bounds(annotation);
   changed();
 }
 

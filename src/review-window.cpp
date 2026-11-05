@@ -484,6 +484,7 @@ void Window::build_ui() {
   gtk_widget_add_css_class(inline_editor_, "inline-text-editor");
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(inline_editor_),
                                  GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_overlay_scrolling(GTK_SCROLLED_WINDOW(inline_editor_), TRUE);
   inline_text_view_ = GTK_TEXT_VIEW(gtk_text_view_new());
   gtk_widget_add_css_class(GTK_WIDGET(inline_text_view_), "inline-text-editor-view");
   gtk_text_view_set_wrap_mode(inline_text_view_, GTK_WRAP_WORD_CHAR);
@@ -1198,6 +1199,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     if (w->pointer_mode_ != PointerMode::Select) return;
     const auto* annotation = w->selected_annotation();
     if (!annotation) return;
+    if (w->inline_edit_active_ && w->inline_edit_id_ == annotation->id) return;
     const auto& b = annotation->bounds;
     cairo_save(cr);
     cairo_set_source_rgb(cr, 0.20, 0.52, 0.95);
@@ -1220,7 +1222,9 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   };
 
   if (!w->continuous_scroll_) {
-    cairo_surface_t* surface = w->document_->render_page(w->current_page_, w->zoom_, true);
+    const std::uint64_t skip = w->inline_edit_active_ ? w->inline_edit_id_ : 0;
+    cairo_surface_t* surface =
+        w->document_->render_page(w->current_page_, w->zoom_, true, skip);
     if (!surface) return;
     const int sw = cairo_image_surface_get_width(surface);
     const int sh = cairo_image_surface_get_height(surface);
@@ -1242,7 +1246,9 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     const double page_height = page.height_points * w->zoom_;
     const double bottom = top + page_height;
     if (bottom >= view_top && top <= view_bottom) {
-      cairo_surface_t* surface = w->document_->render_page(i, w->zoom_, true);
+      const std::uint64_t skip =
+          w->inline_edit_active_ && i == w->inline_edit_page_ ? w->inline_edit_id_ : 0;
+      cairo_surface_t* surface = w->document_->render_page(i, w->zoom_, true, skip);
       if (surface) {
         const int sw = cairo_image_surface_get_width(surface);
         const double x = std::max(0.0, (width - sw) / 2.0);
@@ -1429,8 +1435,8 @@ void Window::start_inline_text_edit(std::size_t page, std::uint64_t id, bool is_
   GtkTextIter end;
   gtk_text_buffer_get_end_iter(buffer, &end);
   gtk_text_buffer_place_cursor(buffer, &end);
-  apply_inline_text_style();
   position_inline_editor();
+  apply_inline_text_style();
   gtk_widget_set_visible(inline_editor_, TRUE);
   gtk_widget_grab_focus(GTK_WIDGET(inline_text_view_));
 }
@@ -1450,13 +1456,16 @@ void Window::position_inline_editor() {
       offset_x + annotation.bounds.x * zoom_)));
   const int y = std::max(0, static_cast<int>(std::floor(
       offset_y + annotation.bounds.y * zoom_)));
-  const int width = std::max(80, static_cast<int>(std::ceil(
-      (annotation.bounds.width + 8.0) * zoom_)));
-  const int height = std::max(32, static_cast<int>(std::ceil(
-      (annotation.bounds.height + 4.0) * zoom_)));
+  const int width = std::max(24, static_cast<int>(std::ceil(
+      annotation.bounds.width * zoom_)));
   gtk_widget_set_margin_start(inline_editor_, x);
   gtk_widget_set_margin_top(inline_editor_, y);
-  gtk_widget_set_size_request(inline_editor_, width, height);
+  gtk_widget_set_size_request(inline_editor_, width, -1);
+  const int padding = std::max(0, static_cast<int>(std::round(4.0 * zoom_)));
+  gtk_text_view_set_left_margin(inline_text_view_, padding);
+  gtk_text_view_set_right_margin(inline_text_view_, padding);
+  gtk_text_view_set_top_margin(inline_text_view_, padding);
+  gtk_text_view_set_bottom_margin(inline_text_view_, padding);
 }
 
 void Window::apply_inline_text_style() {
@@ -1487,6 +1496,40 @@ void Window::apply_inline_text_style() {
       inline_text_view_,
       annotation.align == TextAlign::Center ? GTK_JUSTIFY_CENTER :
       annotation.align == TextAlign::Right ? GTK_JUSTIFY_RIGHT : GTK_JUSTIFY_LEFT);
+
+  const int width = std::max(24, static_cast<int>(std::ceil(
+      annotation.bounds.width * zoom_)));
+  const int padding = std::max(0, static_cast<int>(std::round(4.0 * zoom_)));
+  const int inner_width = std::max(1, width - padding * 2);
+  PangoLayout* layout = pango_layout_new(
+      gtk_widget_get_pango_context(GTK_WIDGET(inline_text_view_)));
+  PangoFontDescription* font = pango_font_description_new();
+  pango_font_description_set_family(
+      font, annotation.font_family.empty() ? "Sans" : annotation.font_family.c_str());
+  pango_font_description_set_size(
+      font, std::max(1, static_cast<int>(annotation.font_size * zoom_ * PANGO_SCALE)));
+  pango_font_description_set_weight(
+      font, annotation.bold ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+  pango_font_description_set_style(
+      font, annotation.italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
+  pango_layout_set_font_description(layout, font);
+  pango_font_description_free(font);
+  pango_layout_set_width(layout, inner_width * PANGO_SCALE);
+  pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+  char* text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+  pango_layout_set_text(layout, text ? text : "", -1);
+  g_free(text);
+  int text_width = 0;
+  int text_height = 0;
+  pango_layout_get_size(layout, &text_width, &text_height);
+  g_object_unref(layout);
+  const int minimum_height = std::max(24, static_cast<int>(std::ceil(
+      annotation.bounds.height * zoom_)));
+  const int height = std::max(
+      minimum_height,
+      static_cast<int>(std::ceil(text_height / static_cast<double>(PANGO_SCALE))) +
+          padding * 2);
+  gtk_widget_set_size_request(inline_editor_, width, height);
 }
 
 void Window::finish_inline_text_edit(bool commit) {
