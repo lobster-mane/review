@@ -948,12 +948,19 @@ void Window::update_current_page_from_scroll() {
   if (!continuous_scroll_ || !document_ || !canvas_scroll_) return;
   auto* adjustment = gtk_scrolled_window_get_vadjustment(canvas_scroll_);
   const double top = gtk_adjustment_get_value(adjustment);
+  const double lower = gtk_adjustment_get_lower(adjustment);
   const double maximum = gtk_adjustment_get_upper(adjustment) -
                          gtk_adjustment_get_page_size(adjustment);
-  const double y = maximum > 0.0 && top >= maximum - 0.5
-      ? top + gtk_adjustment_get_page_size(adjustment) - 1.0
-      : top + 1.0;
-  set_current_page(page_at_canvas_y(y));
+  if (top <= lower + 0.5) {
+    set_current_page(0);
+  } else if (maximum > 0.0 && top >= maximum - 0.5) {
+    set_current_page(document_->page_count() - 1);
+  } else {
+    // Advance as soon as the next page occupies most of the viewport, rather
+    // than waiting for the previous page to leave it completely.
+    set_current_page(page_at_canvas_y(
+        top + gtk_adjustment_get_page_size(adjustment) / 2.0));
+  }
 }
 
 void Window::scroll_to_page(std::size_t page, bool scroll_to_bottom) {
