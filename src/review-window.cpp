@@ -390,6 +390,16 @@ void Window::build_ui() {
       Window* w, GtkListBoxRow* row) {
     if (row) w->select_page(row_index(row));
   }), this);
+  g_signal_connect(sidebar_, "row-selected", G_CALLBACK(+[](
+      GtkListBox*, GtkListBoxRow* row, gpointer data) {
+    auto* w = self(data);
+    if (w->syncing_sidebar_ || !row || !w->document_) return;
+    GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
+    const bool single = rows && !rows->next;
+    const auto page = row_index(row);
+    g_list_free(rows);
+    if (single) w->select_page(page);
+  }), this);
   auto* file_drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
   g_signal_connect(file_drop, "drop", G_CALLBACK(+[](
       GtkDropTarget*, const GValue* value, double, double, gpointer data) -> gboolean {
@@ -778,13 +788,17 @@ void Window::refresh() {
 }
 
 void Window::rebuild_sidebar() {
+  syncing_sidebar_ = true;
   GtkWidget* child = gtk_widget_get_first_child(GTK_WIDGET(sidebar_));
   while (child) {
     GtkWidget* next = gtk_widget_get_next_sibling(child);
     gtk_list_box_remove(sidebar_, child);
     child = next;
   }
-  if (!document_) return;
+  if (!document_) {
+    syncing_sidebar_ = false;
+    return;
+  }
   for (std::size_t i = 0; i < document_->page_count(); ++i) {
     auto* box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
     cairo_surface_t* surface = document_->render_page(i, .16, true);
@@ -850,6 +864,7 @@ void Window::rebuild_sidebar() {
     gtk_list_box_append(sidebar_, GTK_WIDGET(row));
     if (i == current_page_) gtk_list_box_select_row(sidebar_, row);
   }
+  syncing_sidebar_ = false;
 }
 
 double Window::page_top(std::size_t page) const {
@@ -936,9 +951,11 @@ void Window::set_current_page(std::size_t page) {
   current_page_ = page;
   selected_annotation_id_ = 0;
   if (sidebar_) {
+    syncing_sidebar_ = true;
     gtk_list_box_unselect_all(sidebar_);
     if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
       gtk_list_box_select_row(sidebar_, row);
+    syncing_sidebar_ = false;
   }
   update_page_status();
   gtk_widget_queue_draw(GTK_WIDGET(canvas_));

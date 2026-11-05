@@ -88,6 +88,7 @@ private:
   double zoom_{1.0};
   bool fit_width_{true};
   bool continuous_scroll_{false};
+  bool syncing_sidebar_{false};
   bool warned_destructive_{};
   bool tool_active_{};
   bool crop_mode_{};
