@@ -505,7 +505,7 @@ void Window::build_ui() {
           GTK_EVENT_CONTROLLER_SCROLL_VERTICAL | GTK_EVENT_CONTROLLER_SCROLL_KINETIC));
   gtk_event_controller_set_propagation_phase(page_scroll, GTK_PHASE_CAPTURE);
   g_signal_connect(page_scroll, "scroll", G_CALLBACK(+[](
-      GtkEventControllerScroll*, double, double dy, gpointer data) -> gboolean {
+      GtkEventControllerScroll* controller, double, double dy, gpointer data) -> gboolean {
     auto* w = self(data);
     if (w->continuous_scroll_) return FALSE;
     if (!w->document_ || dy == 0.0 || w->document_->page_count() < 2) return FALSE;
@@ -530,16 +530,20 @@ void Window::build_ui() {
     const gint64 now = g_get_monotonic_time();
     // Smooth touchpad gestures may keep sending deltas after the page has
     // changed. Limit one edge transition per short gesture burst.
-    if (now - w->last_edge_page_change_ < 300000) {
+    if (now - w->last_edge_page_change_ < 400000) {
       w->edge_scroll_accum_ = 0.0;
       w->edge_scroll_events_ = 0;
       return FALSE;
     }
 
-    // Only turn the page on a deliberate, fast scroll: accumulate a short
-    // burst of deltas instead of switching on every edge event.
+    // Wheel deltas are in notches; touchpad deltas are in pixels. Require a
+    // deliberate, fast burst so slow scrolling at the edge does nothing.
+    const bool wheel =
+        gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL;
+    const double threshold = wheel ? 4.0 : 20.0;
+    const gint64 window = wheel ? 300000 : 200000;
     if (direction != w->edge_scroll_direction_ ||
-        now - w->edge_scroll_start_ > 350000) {
+        now - w->edge_scroll_start_ > window) {
       w->edge_scroll_direction_ = direction;
       w->edge_scroll_start_ = now;
       w->edge_scroll_accum_ = 0.0;
@@ -547,7 +551,7 @@ void Window::build_ui() {
     }
     w->edge_scroll_accum_ += std::abs(dy);
     ++w->edge_scroll_events_;
-    if (w->edge_scroll_accum_ < 3.0 || w->edge_scroll_events_ < 2) return FALSE;
+    if (w->edge_scroll_accum_ < threshold || w->edge_scroll_events_ < 3) return FALSE;
 
     w->edge_scroll_accum_ = 0.0;
     w->edge_scroll_events_ = 0;
