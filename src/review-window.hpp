@@ -108,6 +108,10 @@ private:
   double pan_horizontal_start_{};
   double pan_vertical_start_{};
   gint64 last_edge_page_change_{};
+  gint64 edge_scroll_start_{};
+  double edge_scroll_accum_{};
+  int edge_scroll_events_{};
+  int edge_scroll_direction_{};
   std::vector<Point> ink_points_{};
   std::vector<Point> signature_points_{};
 };

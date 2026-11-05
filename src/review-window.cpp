@@ -467,22 +467,46 @@ void Window::build_ui() {
     const double value = gtk_adjustment_get_value(adjustment);
     const bool at_top = value <= lower + 0.5;
     const bool at_bottom = value >= maximum - 0.5;
-    const gint64 now = g_get_monotonic_time();
+    const int direction = dy > 0.0 ? 1 : -1;
+    const bool can_next = direction > 0 && at_bottom &&
+                          w->current_page_ + 1 < w->document_->page_count();
+    const bool can_previous = direction < 0 && at_top && w->current_page_ > 0;
+    if (!can_next && !can_previous) {
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
+      w->edge_scroll_direction_ = 0;
+      return FALSE;
+    }
 
+    const gint64 now = g_get_monotonic_time();
     // Smooth touchpad gestures may keep sending deltas after the page has
     // changed. Limit one edge transition per short gesture burst.
-    if (now - w->last_edge_page_change_ < 250000) return FALSE;
-    if (dy > 0.0 && at_bottom && w->current_page_ + 1 < w->document_->page_count()) {
-      w->last_edge_page_change_ = now;
-      w->select_page(w->current_page_ + 1, false);
-      return TRUE;
+    if (now - w->last_edge_page_change_ < 300000) {
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
+      return FALSE;
     }
-    if (dy < 0.0 && at_top && w->current_page_ > 0) {
-      w->last_edge_page_change_ = now;
-      w->select_page(w->current_page_ - 1, true);
-      return TRUE;
+
+    // Only turn the page on a deliberate, fast scroll: accumulate a short
+    // burst of deltas instead of switching on every edge event.
+    if (direction != w->edge_scroll_direction_ ||
+        now - w->edge_scroll_start_ > 350000) {
+      w->edge_scroll_direction_ = direction;
+      w->edge_scroll_start_ = now;
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
     }
-    return FALSE;
+    w->edge_scroll_accum_ += std::abs(dy);
+    ++w->edge_scroll_events_;
+    if (w->edge_scroll_accum_ < 3.0 || w->edge_scroll_events_ < 2) return FALSE;
+
+    w->edge_scroll_accum_ = 0.0;
+    w->edge_scroll_events_ = 0;
+    w->edge_scroll_direction_ = 0;
+    w->last_edge_page_change_ = now;
+    if (can_next) w->select_page(w->current_page_ + 1, false);
+    else w->select_page(w->current_page_ - 1, true);
+    return TRUE;
   }), this);
   gtk_widget_add_controller(GTK_WIDGET(canvas_scroll_), page_scroll);
 
