@@ -104,7 +104,8 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   `schedule_page_render()` renders missing full-resolution pages in idle time.
   Full renders are paused during scrolling and resume after the adjustment
   settles, so a slow page never blocks the viewport while the user is moving.
-  `schedule_preload_next_page()` warms the following page the same way.
+  `schedule_preload_next_page()` warms the following page the same way. Set
+  `REVIEW_DEBUG_LOADING=1` to log scroll/draw/cache/render timing to stderr.
 - Inline text editing is an overlay inside `canvas_overlay_`. Call
   `finish_inline_text_edit()` before changing page, zoom, view mode, or layout.
   Newly typed text inherits the current typing style through the editor's

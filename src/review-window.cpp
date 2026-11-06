@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -22,6 +23,22 @@ constexpr double kPageGap = 12.0;
 constexpr double kCanvasMargin = 24.0;
 constexpr std::size_t kPageCacheLimit = 6;
 constexpr std::size_t kToolColorCount = 8;
+
+bool loading_debug_enabled() {
+  static const bool enabled = g_getenv("REVIEW_DEBUG_LOADING") != nullptr;
+  return enabled;
+}
+
+void loading_log(const char* format, ...) {
+  if (!loading_debug_enabled()) return;
+  va_list args;
+  va_start(args, format);
+  gchar* message = g_strdup_vprintf(format, args);
+  va_end(args);
+  g_printerr("[review-loading %.3f] %s\n", g_get_monotonic_time() / 1000000.0,
+             message);
+  g_free(message);
+}
 
 std::size_t tool_color_index(AnnotationType type) {
   return static_cast<std::size_t>(type);
@@ -157,22 +174,24 @@ Window::~Window() {
 }
 
 void Window::schedule_preload_next_page() {
-  if (pinch_active_ || !document_ ||
+  if (continuous_scroll_ || pinch_active_ || !document_ ||
       current_page_ + 1 >= document_->page_count())
     return;
   schedule_page_render(current_page_ + 1, 0);
 }
 
 void Window::note_scroll_activity() {
+  if (!scrolling_) loading_log("scroll start");
   scrolling_ = true;
   if (scroll_settle_source_id_) g_source_remove(scroll_settle_source_id_);
-  scroll_settle_source_id_ = g_timeout_add(120, Window::finish_scroll, this);
+  scroll_settle_source_id_ = g_timeout_add(400, Window::finish_scroll, this);
 }
 
 gboolean Window::finish_scroll(gpointer data) {
   auto* w = static_cast<Window*>(data);
   w->scroll_settle_source_id_ = 0;
   w->scrolling_ = false;
+  loading_log("scroll end pending=%zu", w->pending_page_renders_.size());
   if (w->document_ && w->canvas_scroll_) {
     auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
     const double view_top = gtk_adjustment_get_value(adjustment);
@@ -202,7 +221,9 @@ gboolean Window::finish_scroll(gpointer data) {
 void Window::schedule_page_render(std::size_t page, std::uint64_t skip) {
   if (!document_ || page >= document_->page_count()) return;
   if (cached_page(page, skip, false)) return;
-  pending_page_renders_.insert({page, skip});
+  const bool added = pending_page_renders_.insert({page, skip}).second;
+  if (added) loading_log("queue page %zu scrolling=%d pinch=%d", page,
+                         scrolling_, pinch_active_);
   if (!scrolling_ && !page_render_source_id_)
     page_render_source_id_ = g_idle_add(Window::render_pending_pages, this);
 }
@@ -239,7 +260,11 @@ gboolean Window::render_pending_pages(gpointer data) {
                     page_top <= view_bottom + margin;
   }
   if (near_viewport) {
+    loading_log("render page %zu start", page);
+    const gint64 start = g_get_monotonic_time();
     w->cached_page(page, skip);
+    loading_log("render page %zu done %.1f ms", page,
+                (g_get_monotonic_time() - start) / 1000.0);
     if (w->canvas_) gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
   }
   if (!w->pending_page_renders_.empty())
@@ -260,6 +285,9 @@ cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip,
   const bool zoom_changed = page_cache_zoom_ != zoom_;
   if (page_cache_revision_ != document_->revision() ||
       (zoom_changed && !pinch_active_)) {
+    loading_log("clear page cache revision=%d zoom=%d->%.3f pinch=%d",
+                page_cache_revision_ != document_->revision(), zoom_changed,
+                zoom_, pinch_active_);
     clear_page_cache();
   }
   for (auto it = page_cache_.begin(); it != page_cache_.end(); ++it) {
@@ -275,7 +303,13 @@ cairo_surface_t* Window::cached_page(std::size_t page, std::uint64_t skip,
   // scale them. This avoids a full page render on every gesture event.
   const double render_scale =
       (pinch_active_ && page_cache_zoom_ > 0.0) ? page_cache_zoom_ : zoom_;
+  const gint64 render_start = g_get_monotonic_time();
   cairo_surface_t* surface = document_->render_page(page, render_scale, true, skip);
+  if (surface)
+    loading_log("rendered page %zu at %.3f in %.1f ms", page, render_scale,
+                (g_get_monotonic_time() - render_start) / 1000.0);
+  else
+    loading_log("render failed page %zu", page);
   if (!surface) return nullptr;
   if (page_cache_.size() >= kPageCacheLimit) {
     cairo_surface_destroy(page_cache_.front().surface);
@@ -1652,6 +1686,9 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   cairo_set_source_rgb(cr, .18, .18, .18);
   cairo_paint(cr);
   if (!w->document_ || w->document_->page_count() == 0) return;
+  loading_log("draw continuous=%d current=%zu scrolling=%d pinch=%d",
+              w->continuous_scroll_, w->current_page_, w->scrolling_,
+              w->pinch_active_);
   const bool revision_stale =
       w->page_cache_revision_ != w->document_->revision();
   const bool zoom_stale =
@@ -1674,9 +1711,11 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   auto paint_missing_page = [&](std::size_t page, double x, double y,
                                 double draw_width, double draw_height) {
     if (page < w->page_previews_.size() && w->page_previews_[page]) {
+      loading_log("placeholder page %zu using preview", page);
       paint_page_surface(w->page_previews_[page], x, y, draw_width, draw_height);
       return;
     }
+    loading_log("placeholder page %zu using white page", page);
     cairo_save(cr);
     cairo_set_source_rgb(cr, 1, 1, 1);
     cairo_rectangle(cr, x, y, draw_width, draw_height);
@@ -1898,10 +1937,17 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     const double draw_height = page.height_points * w->zoom_;
     const double x = std::max(0.0, (width - draw_width) / 2.0);
     const double y = std::max(0.0, (height - draw_height) / 2.0);
-    if (surface) {
+    const bool preview = w->scrolling_ &&
+        w->current_page_ < w->page_previews_.size() &&
+        w->page_previews_[w->current_page_];
+    if (preview) {
+      paint_page_surface(w->page_previews_[w->current_page_], x, y,
+                         draw_width, draw_height);
+    } else if (surface) {
       paint_page_surface(surface, x, y, draw_width, draw_height);
     } else {
-      if (!w->pinch_active_) w->schedule_page_render(w->current_page_, skip);
+      if (!w->pinch_active_ && !w->scrolling_)
+        w->schedule_page_render(w->current_page_, skip);
       paint_missing_page(w->current_page_, x, y, draw_width, draw_height);
     }
     draw_selection(x, y);
@@ -1909,6 +1955,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
     draw_tool_preview(x, y);
     draw_crop_guides(x, y);
     draw_text_drag();
+    loading_log("draw end single");
     return;
   }
 
@@ -1930,10 +1977,16 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
       cairo_surface_t* surface = w->cached_page(i, skip, render_now);
       const double draw_width = page.width_points * w->zoom_;
       const double x = std::max(0.0, (width - draw_width) / 2.0);
-      if (surface) {
+      const bool preview = w->scrolling_ && i < w->page_previews_.size() &&
+                           w->page_previews_[i];
+      loading_log("visible page %zu top=%.0f preview=%d cached=%d scrolling=%d",
+                  i, top, preview, surface != nullptr, w->scrolling_);
+      if (preview) {
+        paint_page_surface(w->page_previews_[i], x, top, draw_width, page_height);
+      } else if (surface) {
         paint_page_surface(surface, x, top, draw_width, page_height);
       } else {
-        if (!w->pinch_active_) w->schedule_page_render(i, skip);
+        if (!w->pinch_active_ && !w->scrolling_) w->schedule_page_render(i, skip);
         paint_missing_page(i, x, top, draw_width, page_height);
       }
     }
@@ -1948,6 +2001,7 @@ void Window::draw_page(GtkDrawingArea*, cairo_t* cr, int width, int height, gpoi
   draw_tool_preview(current_x, w->page_top(w->current_page_));
   draw_crop_guides(current_x, w->page_top(w->current_page_));
   draw_text_drag();
+  loading_log("draw end continuous");
 }
 
 void Window::select_page(std::size_t page, bool scroll_to_bottom) {
