@@ -881,8 +881,10 @@ void Window::build_ui() {
           GTK_EVENT_CONTROLLER_SCROLL_VERTICAL | GTK_EVENT_CONTROLLER_SCROLL_KINETIC));
   gtk_event_controller_set_propagation_phase(page_scroll, GTK_PHASE_CAPTURE);
   g_signal_connect(page_scroll, "scroll", G_CALLBACK(+[](
-      GtkEventControllerScroll*, double, double dy, gpointer data) -> gboolean {
+      GtkEventControllerScroll* controller, double, double dy, gpointer data) -> gboolean {
     auto* w = self(data);
+    // Continuous view uses the scrolled window directly; page-turn velocity
+    // thresholds only belong to single-page mode.
     if (w->continuous_scroll_) return FALSE;
     if (!w->document_ || dy == 0.0 || w->document_->page_count() < 2) return FALSE;
     auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
@@ -896,9 +898,43 @@ void Window::build_ui() {
     const bool can_next = direction > 0 && at_bottom &&
                           w->current_page_ + 1 < w->document_->page_count();
     const bool can_previous = direction < 0 && at_top && w->current_page_ > 0;
-    if (!can_next && !can_previous) return FALSE;
-    if (w->page_turn_pending_) return TRUE;
-    w->page_turn_pending_ = true;
+    if (!can_next && !can_previous) {
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
+      w->edge_scroll_direction_ = 0;
+      return FALSE;
+    }
+
+    const gint64 now = g_get_monotonic_time();
+    // Smooth touchpad gestures may keep sending deltas after the page has
+    // changed. Limit one edge transition per short gesture burst.
+    if (now - w->last_edge_page_change_ < 500000) {
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
+      return FALSE;
+    }
+
+    // Wheel deltas are in notches; touchpad deltas are in pixels. Require a
+    // deliberate, fast burst so slow scrolling at the edge does nothing.
+    const bool wheel =
+        gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL;
+    const double threshold = wheel ? 8.0 : 80.0;
+    const gint64 window = wheel ? 300000 : 200000;
+    if (direction != w->edge_scroll_direction_ ||
+        now - w->edge_scroll_start_ > window) {
+      w->edge_scroll_direction_ = direction;
+      w->edge_scroll_start_ = now;
+      w->edge_scroll_accum_ = 0.0;
+      w->edge_scroll_events_ = 0;
+    }
+    w->edge_scroll_accum_ += std::abs(dy);
+    ++w->edge_scroll_events_;
+    if (w->edge_scroll_accum_ < threshold || w->edge_scroll_events_ < 4) return FALSE;
+
+    w->edge_scroll_accum_ = 0.0;
+    w->edge_scroll_events_ = 0;
+    w->edge_scroll_direction_ = 0;
+    w->last_edge_page_change_ = now;
     if (can_next) w->select_page(w->current_page_ + 1, false);
     else w->select_page(w->current_page_ - 1, true);
     return TRUE;
@@ -1641,7 +1677,6 @@ void Window::scroll_to_page(std::size_t page, bool scroll_to_bottom) {
     gtk_adjustment_set_value(adjustment, std::clamp(request->value, lower,
                                                     std::max(lower, upper)));
     request->window->set_current_page(request->page);
-    request->window->page_turn_pending_ = false;
     delete request;
     return G_SOURCE_REMOVE;
   }, request, nullptr);

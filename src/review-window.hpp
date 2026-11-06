@@ -204,7 +204,11 @@ private:
   std::size_t annotation_drag_page_{};
   std::size_t annotation_origin_page_{};
   std::uint64_t annotation_drag_id_{};
-  bool page_turn_pending_{};
+  gint64 last_edge_page_change_{};
+  gint64 edge_scroll_start_{};
+  double edge_scroll_accum_{};
+  int edge_scroll_events_{};
+  int edge_scroll_direction_{};
   std::size_t inline_edit_page_{};
   std::uint64_t inline_edit_id_{};
   Annotation inline_edit_annotation_{};
