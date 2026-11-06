@@ -37,6 +37,8 @@ private:
                                bool render_if_missing = true);
   void schedule_page_render(std::size_t page, std::uint64_t skip);
   static gboolean render_pending_pages(gpointer data);
+  void note_scroll_activity();
+  static gboolean finish_scroll(gpointer data);
   void clear_page_cache();
   void schedule_preload_next_page();
   void update_title();
@@ -148,6 +150,8 @@ private:
   std::vector<cairo_surface_t*> page_previews_{};
   std::set<std::pair<std::size_t, std::uint64_t>> pending_page_renders_{};
   guint page_render_source_id_{};
+  guint scroll_settle_source_id_{};
+  bool scrolling_{};
   SignatureStore signatures_{};
   std::size_t current_page_{};
   double zoom_{1.0};

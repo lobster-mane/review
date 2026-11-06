@@ -145,6 +145,10 @@ Window::~Window() {
     g_source_remove(page_render_source_id_);
     page_render_source_id_ = 0;
   }
+  if (scroll_settle_source_id_) {
+    g_source_remove(scroll_settle_source_id_);
+    scroll_settle_source_id_ = 0;
+  }
   clear_page_cache();
   for (auto* preview : page_previews_)
     if (preview) cairo_surface_destroy(preview);
@@ -159,17 +163,54 @@ void Window::schedule_preload_next_page() {
   schedule_page_render(current_page_ + 1, 0);
 }
 
+void Window::note_scroll_activity() {
+  scrolling_ = true;
+  if (scroll_settle_source_id_) g_source_remove(scroll_settle_source_id_);
+  scroll_settle_source_id_ = g_timeout_add(120, Window::finish_scroll, this);
+}
+
+gboolean Window::finish_scroll(gpointer data) {
+  auto* w = static_cast<Window*>(data);
+  w->scroll_settle_source_id_ = 0;
+  w->scrolling_ = false;
+  if (w->document_ && w->canvas_scroll_) {
+    auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
+    const double view_top = gtk_adjustment_get_value(adjustment);
+    const double view_bottom = view_top + gtk_adjustment_get_page_size(adjustment);
+    const double margin = std::max(0.0, (view_bottom - view_top) * 0.5);
+    for (auto it = w->pending_page_renders_.begin();
+         it != w->pending_page_renders_.end();) {
+      const auto page = it->first;
+      bool near_viewport = page < w->document_->page_count();
+      if (near_viewport) {
+        const double page_top = w->page_top(page);
+        const double page_bottom = page_top +
+            w->document_->page(page).height_points * w->zoom_;
+        near_viewport = page_bottom >= view_top - margin &&
+                        page_top <= view_bottom + margin;
+      }
+      it = near_viewport ? std::next(it) : w->pending_page_renders_.erase(it);
+    }
+  }
+  if (w->canvas_) gtk_widget_queue_draw(GTK_WIDGET(w->canvas_));
+  w->schedule_preload_next_page();
+  if (!w->pending_page_renders_.empty() && !w->page_render_source_id_)
+    w->page_render_source_id_ = g_idle_add(Window::render_pending_pages, w);
+  return G_SOURCE_REMOVE;
+}
+
 void Window::schedule_page_render(std::size_t page, std::uint64_t skip) {
   if (!document_ || page >= document_->page_count()) return;
   if (cached_page(page, skip, false)) return;
   pending_page_renders_.insert({page, skip});
-  if (!page_render_source_id_)
+  if (!scrolling_ && !page_render_source_id_)
     page_render_source_id_ = g_idle_add(Window::render_pending_pages, this);
 }
 
 gboolean Window::render_pending_pages(gpointer data) {
   auto* w = static_cast<Window*>(data);
   w->page_render_source_id_ = 0;
+  if (w->scrolling_) return G_SOURCE_REMOVE;
   if (w->pinch_active_) return G_SOURCE_REMOVE;
   if (!w->document_ || w->pending_page_renders_.empty()) return G_SOURCE_REMOVE;
 
@@ -795,7 +836,9 @@ void Window::build_ui() {
   gtk_scrolled_window_set_child(canvas_scroll_, GTK_WIDGET(canvas_overlay_));
   g_signal_connect(gtk_scrolled_window_get_vadjustment(canvas_scroll_), "value-changed",
                    G_CALLBACK(+[](GtkAdjustment*, gpointer data) {
-                     self(data)->update_current_page_from_scroll();
+                     auto* w = self(data);
+                     w->note_scroll_activity();
+                     w->update_current_page_from_scroll();
                    }), this);
   gtk_box_append(content, GTK_WIDGET(canvas_scroll_));
 
