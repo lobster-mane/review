@@ -99,12 +99,10 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Rendered page surfaces are cached in `Window`; `Document::revision()` and
   the zoom level invalidate the cache. Call `Document::invalidate_rendering()`
   for live annotation mutations (moves/resizes) so cached text follows the box.
-  The sidebar's low-resolution page renders are kept in `page_previews_` so
-  `draw_page()` can show a placeholder immediately, while
-  `schedule_page_render()` renders missing full-resolution pages in idle time.
-  Full renders are paused during scrolling and resume after the adjustment
-  settles, so a slow page never blocks the viewport while the user is moving.
-  `schedule_preload_next_page()` warms the following page the same way. Set
+  Missing full-resolution pages render in idle time and are painted as plain
+  white page placeholders until ready. The canvas paints only the visible
+  slice of its very tall drawing area, and scroll events queue full canvas and
+  overlay redraws so partial damage cannot leave dark regions. Set
   `REVIEW_DEBUG_LOADING=1` to log scroll/draw/cache/render timing to stderr.
 - Inline text editing is an overlay inside `canvas_overlay_`. Call
   `finish_inline_text_edit()` before changing page, zoom, view mode, or layout.

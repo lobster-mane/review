@@ -147,7 +147,6 @@ private:
   std::vector<CachedPage> page_cache_;
   std::uint64_t page_cache_revision_{};
   double page_cache_zoom_{};
-  std::vector<cairo_surface_t*> page_previews_{};
   std::set<std::pair<std::size_t, std::uint64_t>> pending_page_renders_{};
   guint page_render_source_id_{};
   guint scroll_settle_source_id_{};
