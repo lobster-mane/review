@@ -2,12 +2,8 @@
   background: #2e2e2e;
 }
 
-.navigation-sidebar row {
+.navigation-sidebar flowboxchild {
   padding: 10px;
-}
-
-.navigation-sidebar picture {
-  box-shadow: 0 2px 8px alpha(black, .35);
 }
 
 .inline-text-editor {

@@ -88,6 +88,11 @@ private:
   void apply_tool_colors(AnnotationType type);
   void show_current_page(std::size_t page);
   void sync_sidebar_selection(std::size_t page);
+  void scroll_sidebar_to_page(std::size_t page);
+  void update_sidebar_thumbnail_sizes();
+  void queue_sidebar_thumbnail_sizes();
+  static gboolean sidebar_thumbnail_sizes_timeout(gpointer data);
+  static gboolean follow_sidebar_page(gpointer data);
   void move_dragged_annotation(Annotation& annotation, double dx, double dy,
                                double x_shift, double y_shift);
   void choose_font();
@@ -107,7 +112,7 @@ private:
   AdwApplicationWindow* window_{};
   AdwToastOverlay* toast_overlay_{};
   GtkPaned* split_{};
-  GtkListBox* sidebar_{};
+  GtkFlowBox* sidebar_{};
   GtkDrawingArea* canvas_{};
   GtkScrolledWindow* canvas_scroll_{};
   GtkOverlay* canvas_overlay_{};
@@ -150,6 +155,8 @@ private:
   std::set<std::pair<std::size_t, std::uint64_t>> pending_page_renders_{};
   guint page_render_source_id_{};
   guint scroll_settle_source_id_{};
+  guint sidebar_thumbnail_sizes_source_id_{};
+  guint sidebar_follow_source_id_{};
   bool scrolling_{};
   SignatureStore signatures_{};
   std::size_t current_page_{};
@@ -162,6 +169,8 @@ private:
   bool syncing_sidebar_{false};
   GdkModifierType sidebar_modifiers_{};
   std::size_t sidebar_anchor_{};
+  std::size_t sidebar_pressed_page_{};
+  bool sidebar_press_pending_{};
   int sidebar_position_{180};
   double last_scroll_value_{};
   bool has_last_scroll_value_{};

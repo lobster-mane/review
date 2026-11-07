@@ -21,6 +21,7 @@ namespace {
 
 constexpr double kPageGap = 12.0;
 constexpr double kCanvasMargin = 24.0;
+constexpr int kSidebarMaxWidth = 700;
 constexpr std::size_t kPageCacheLimit = 6;
 constexpr std::size_t kToolColorCount = 8;
 
@@ -97,8 +98,8 @@ void append_button(GtkBox* box, GtkWidget* button) {
   gtk_box_append(box, button);
 }
 
-std::size_t row_index(GtkListBoxRow* row) {
-  return static_cast<std::size_t>(gtk_list_box_row_get_index(row));
+std::size_t child_index(GtkFlowBoxChild* child) {
+  return static_cast<std::size_t>(gtk_flow_box_child_get_index(child));
 }
 
 bool text_spans_equal(const std::vector<TextSpan>& left,
@@ -165,6 +166,14 @@ Window::~Window() {
   if (scroll_settle_source_id_) {
     g_source_remove(scroll_settle_source_id_);
     scroll_settle_source_id_ = 0;
+  }
+  if (sidebar_thumbnail_sizes_source_id_) {
+    g_source_remove(sidebar_thumbnail_sizes_source_id_);
+    sidebar_thumbnail_sizes_source_id_ = 0;
+  }
+  if (sidebar_follow_source_id_) {
+    g_source_remove(sidebar_follow_source_id_);
+    sidebar_follow_source_id_ = 0;
   }
   clear_page_cache();
   if (recent_menu_) g_object_unref(recent_menu_);
@@ -486,7 +495,8 @@ void Window::build_ui() {
     auto* sidebar = gtk_paned_get_start_child(w->split_);
     if (!sidebar) return;
     if (gtk_widget_get_visible(sidebar)) {
-      w->sidebar_position_ = gtk_paned_get_position(w->split_);
+      w->sidebar_position_ =
+          std::min(gtk_paned_get_position(w->split_), kSidebarMaxWidth);
       gtk_widget_set_visible(sidebar, FALSE);
     } else {
       gtk_widget_set_visible(sidebar, TRUE);
@@ -719,7 +729,16 @@ void Window::build_ui() {
   adw_toolbar_view_add_top_bar(toolbar_view, GTK_WIDGET(annotation_bar));
 
   split_ = GTK_PANED(gtk_paned_new(GTK_ORIENTATION_HORIZONTAL));
-  gtk_paned_set_position(split_, sidebar_position_);
+  gtk_paned_set_position(split_, std::min(sidebar_position_, kSidebarMaxWidth));
+  g_signal_connect(split_, "notify::position", G_CALLBACK(+[](
+      GObject*, GParamSpec*, gpointer data) {
+    auto* w = self(data);
+    if (gtk_paned_get_position(w->split_) > kSidebarMaxWidth) {
+      gtk_paned_set_position(w->split_, kSidebarMaxWidth);
+      w->sidebar_position_ = kSidebarMaxWidth;
+    }
+    w->queue_sidebar_thumbnail_sizes();
+  }), this);
   gtk_paned_set_resize_start_child(split_, FALSE);
   gtk_paned_set_resize_end_child(split_, TRUE);
   gtk_paned_set_shrink_start_child(split_, FALSE);
@@ -727,11 +746,22 @@ void Window::build_ui() {
 
   auto* sidebar_scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
   gtk_widget_set_size_request(GTK_WIDGET(sidebar_scroll), 160, -1);
-  sidebar_ = GTK_LIST_BOX(gtk_list_box_new());
-  gtk_list_box_set_selection_mode(sidebar_, GTK_SELECTION_MULTIPLE);
+  sidebar_ = GTK_FLOW_BOX(gtk_flow_box_new());
+  gtk_flow_box_set_selection_mode(sidebar_, GTK_SELECTION_MULTIPLE);
+  gtk_flow_box_set_homogeneous(sidebar_, TRUE);
+  gtk_flow_box_set_column_spacing(sidebar_, 8);
+  gtk_flow_box_set_row_spacing(sidebar_, 8);
+  gtk_widget_set_hexpand(GTK_WIDGET(sidebar_), TRUE);
+  gtk_widget_set_halign(GTK_WIDGET(sidebar_), GTK_ALIGN_FILL);
   gtk_widget_add_css_class(GTK_WIDGET(sidebar_), "navigation-sidebar");
-  gtk_list_box_set_activate_on_single_click(sidebar_, TRUE);
+  gtk_flow_box_set_activate_on_single_click(sidebar_, TRUE);
+  gtk_scrolled_window_set_policy(sidebar_scroll, GTK_POLICY_NEVER,
+                                 GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child(sidebar_scroll, GTK_WIDGET(sidebar_));
+  g_signal_connect(sidebar_, "map", G_CALLBACK(+[](
+      GtkWidget*, gpointer data) {
+    self(data)->queue_sidebar_thumbnail_sizes();
+  }), this);
   gtk_paned_set_start_child(split_, GTK_WIDGET(sidebar_scroll));
   auto* selection_click = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(selection_click),
@@ -739,73 +769,127 @@ void Window::build_ui() {
   gtk_event_controller_set_propagation_phase(
       GTK_EVENT_CONTROLLER(selection_click), GTK_PHASE_CAPTURE);
   g_signal_connect(selection_click, "pressed", G_CALLBACK(+[](
-      GtkGestureClick* gesture, int, double, double y, gpointer data) {
+      GtkGestureClick* gesture, int, double x, double y, gpointer data) {
     auto* w = self(data);
     w->sidebar_modifiers_ =
         gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
-    if (!(w->sidebar_modifiers_ & GDK_SHIFT_MASK) || !w->document_ ||
+    auto* child = gtk_flow_box_get_child_at_pos(w->sidebar_,
+                                                static_cast<int>(x),
+                                                static_cast<int>(y));
+    if (!child || !w->document_) {
+      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+      return;
+    }
+    w->sidebar_pressed_page_ = child_index(child);
+    w->sidebar_press_pending_ = true;
+    if (!(w->sidebar_modifiers_ & GDK_SHIFT_MASK) ||
         w->document_->page_count() == 0) {
-      // Let GtkListBox handle plain and ctrl clicks itself.
+      // Let GtkFlowBox handle plain and ctrl clicks itself.
       gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
       return;
     }
-    auto* row = gtk_list_box_get_row_at_y(w->sidebar_, static_cast<int>(y));
-    if (!row) {
-      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
-      return;
-    }
-    // Claim the press so GtkListBox does not toggle just the clicked row.
+    // Claim the press so GtkFlowBox does not toggle just the clicked child.
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-    const auto page = row_index(row);
+    const auto page = w->sidebar_pressed_page_;
     const auto anchor =
         std::min(w->sidebar_anchor_, w->document_->page_count() - 1);
     const auto first = std::min(anchor, page);
     const auto last = std::max(anchor, page);
     w->syncing_sidebar_ = true;
-    gtk_list_box_unselect_all(w->sidebar_);
+    gtk_flow_box_unselect_all(w->sidebar_);
     for (auto i = first; i <= last; ++i)
-      if (auto* item = gtk_list_box_get_row_at_index(
+      if (auto* item = gtk_flow_box_get_child_at_index(
               w->sidebar_, static_cast<int>(i)))
-        gtk_list_box_select_row(w->sidebar_, item);
+        gtk_flow_box_select_child(w->sidebar_, item);
     w->syncing_sidebar_ = false;
     w->select_page(page);
+    w->scroll_sidebar_to_page(page);
     w->update_page_status();
   }), this);
   gtk_widget_add_controller(GTK_WIDGET(sidebar_),
                             GTK_EVENT_CONTROLLER(selection_click));
-  g_signal_connect_swapped(sidebar_, "row-activated", G_CALLBACK(+[](
-      Window* w, GtkListBoxRow* row) {
-    if (!row) return;
-    GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
-    const bool single = rows && !rows->next;
-    g_list_free(rows);
-    if (single) w->select_page(row_index(row));
+  g_signal_connect(selection_click, "stopped", G_CALLBACK(+[](
+      GtkGestureClick*, gpointer data) {
+    self(data)->sidebar_press_pending_ = false;
   }), this);
-  g_signal_connect(sidebar_, "row-selected", G_CALLBACK(+[](
-      GtkListBox*, GtkListBoxRow* row, gpointer data) {
+  // A drag source on the flow box (not each child) runs before GtkFlowBox's
+  // own capture-phase rubberband gesture, so page reordering keeps working.
+  auto* page_drag = gtk_drag_source_new();
+  gtk_event_controller_set_propagation_phase(
+      GTK_EVENT_CONTROLLER(page_drag), GTK_PHASE_CAPTURE);
+  gtk_drag_source_set_actions(
+      page_drag, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE));
+  g_signal_connect(page_drag, "prepare", G_CALLBACK(+[](
+      GtkDragSource*, double x, double y, gpointer data) -> GdkContentProvider* {
     auto* w = self(data);
-    if (w->syncing_sidebar_ || !row || !w->document_) return;
-    const auto page = row_index(row);
-    const bool control = (w->sidebar_modifiers_ & GDK_CONTROL_MASK) != 0;
-    if (control) {
-      // Keep GTK's toggle behavior; the clicked row becomes the new anchor.
-      w->sidebar_anchor_ = page;
-      w->update_page_status();
-      return;
-    }
-    w->sidebar_anchor_ = page;
-    GList* selected = gtk_list_box_get_selected_rows(w->sidebar_);
-    if (selected && selected->next) {
-      w->syncing_sidebar_ = true;
-      gtk_list_box_unselect_all(w->sidebar_);
-      gtk_list_box_select_row(w->sidebar_, row);
-      w->syncing_sidebar_ = false;
-    }
+    if (!w->document_) return nullptr;
+    auto* child = gtk_flow_box_get_child_at_pos(
+        w->sidebar_, static_cast<int>(x), static_cast<int>(y));
+    if (!child) return nullptr;
+    dragged_source = w;
+    dragged_indices = w->selected_pages();
+    const auto index = child_index(child);
+    loading_log("sidebar drag start child=%zu selected=%zu", index,
+                dragged_indices.size());
+    if (std::find(dragged_indices.begin(), dragged_indices.end(), index) ==
+        dragged_indices.end())
+      dragged_indices = {index};
+    dragged_pages = w->document_->copy_pages(dragged_indices);
+    GValue value = G_VALUE_INIT;
+    g_value_init(&value, G_TYPE_STRING);
+    g_value_set_string(&value, "review-pages");
+    auto* provider = gdk_content_provider_new_for_value(&value);
+    g_value_unset(&value);
+    return provider;
+  }), this);
+  gtk_widget_add_controller(GTK_WIDGET(sidebar_),
+                            GTK_EVENT_CONTROLLER(page_drag));
+  g_signal_connect(sidebar_, "child-activated", G_CALLBACK(+[](
+      GtkFlowBox*, GtkFlowBoxChild* child, gpointer data) {
+    auto* w = self(data);
+    if (!child || !w->document_) return;
+    if (w->sidebar_modifiers_ & GDK_CONTROL_MASK) return;
+    GList* selected = gtk_flow_box_get_selected_children(w->sidebar_);
+    const bool single = selected && !selected->next;
     g_list_free(selected);
-    GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
-    const bool single = rows && !rows->next;
-    g_list_free(rows);
-    if (single) w->select_page(page);
+    if (single) w->select_page(child_index(child));
+  }), this);
+  g_signal_connect(sidebar_, "selected-children-changed", G_CALLBACK(+[](
+      GtkFlowBox*, gpointer data) {
+    auto* w = self(data);
+    if (w->syncing_sidebar_ || !w->document_) return;
+    const bool control = (w->sidebar_modifiers_ & GDK_CONTROL_MASK) != 0;
+    if (w->sidebar_press_pending_) {
+      w->sidebar_press_pending_ = false;
+      w->sidebar_anchor_ = w->sidebar_pressed_page_;
+      if (!control) {
+        // GtkFlowBox toggles children on plain clicks, so collapse any
+        // accumulated selection back to the pressed child.
+        auto* child = gtk_flow_box_get_child_at_index(
+            w->sidebar_, static_cast<int>(w->sidebar_pressed_page_));
+        GList* selected = gtk_flow_box_get_selected_children(w->sidebar_);
+        const bool only = selected && !selected->next &&
+                          selected->data == child;
+        g_list_free(selected);
+        if (child && !only) {
+          w->syncing_sidebar_ = true;
+          gtk_flow_box_unselect_all(w->sidebar_);
+          gtk_flow_box_select_child(w->sidebar_, child);
+          w->syncing_sidebar_ = false;
+        }
+        w->select_page(w->sidebar_pressed_page_);
+        w->scroll_sidebar_to_page(w->sidebar_pressed_page_);
+      }
+    } else if (!control) {
+      GList* selected = gtk_flow_box_get_selected_children(w->sidebar_);
+      if (selected && !selected->next) {
+        const auto page = child_index(GTK_FLOW_BOX_CHILD(selected->data));
+        w->sidebar_anchor_ = page;
+        w->select_page(page);
+        w->scroll_sidebar_to_page(page);
+      }
+      g_list_free(selected);
+    }
     w->update_page_status();
   }), this);
   auto* file_drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
@@ -1468,19 +1552,16 @@ void Window::refresh() {
 
 void Window::rebuild_sidebar() {
   syncing_sidebar_ = true;
-  GtkWidget* child = gtk_widget_get_first_child(GTK_WIDGET(sidebar_));
-  while (child) {
-    GtkWidget* next = gtk_widget_get_next_sibling(child);
-    gtk_list_box_remove(sidebar_, child);
-    child = next;
-  }
+  gtk_flow_box_remove_all(sidebar_);
   if (!document_) {
     syncing_sidebar_ = false;
     return;
   }
   for (std::size_t i = 0; i < document_->page_count(); ++i) {
     auto* box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
-    cairo_surface_t* surface = document_->render_page(i, .16, true);
+    gtk_widget_set_hexpand(GTK_WIDGET(box), TRUE);
+    GtkWidget* thumbnail = nullptr;
+    cairo_surface_t* surface = document_->render_page(i, .32, true);
     if (surface) {
       const int sw = cairo_image_surface_get_width(surface);
       const int sh = cairo_image_surface_get_height(surface);
@@ -1490,8 +1571,12 @@ void Window::rebuild_sidebar() {
       auto* texture = gdk_memory_texture_new(sw, sh, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
                                              bytes, stride);
       auto* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
+      thumbnail = picture;
       gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
-      gtk_widget_set_size_request(picture, 130, 150);
+      gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_CONTAIN);
+      gtk_widget_set_hexpand(picture, TRUE);
+      gtk_widget_set_halign(picture, GTK_ALIGN_FILL);
+      gtk_widget_set_valign(picture, GTK_ALIGN_START);
       gtk_box_append(box, picture);
       g_object_unref(texture);
       g_bytes_unref(bytes);
@@ -1499,38 +1584,22 @@ void Window::rebuild_sidebar() {
     }
     auto* label = gtk_label_new(("Page " + std::to_string(i + 1)).c_str());
     gtk_box_append(box, label);
-    auto* row = GTK_LIST_BOX_ROW(gtk_list_box_row_new());
-    gtk_list_box_row_set_child(row, GTK_WIDGET(box));
-
-    auto* drag = gtk_drag_source_new();
-    gtk_drag_source_set_actions(drag, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE));
-    g_signal_connect(drag, "prepare", G_CALLBACK(+[](
-        GtkDragSource* source, double, double, gpointer data) -> GdkContentProvider* {
-      auto* w = self(data);
-      auto* row = GTK_LIST_BOX_ROW(gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(source)));
-      dragged_source = w;
-      dragged_indices = w->selected_pages();
-      const auto index = row_index(row);
-      if (std::find(dragged_indices.begin(), dragged_indices.end(), index) == dragged_indices.end())
-        dragged_indices = {index};
-      dragged_pages = w->document_->copy_pages(dragged_indices);
-      GValue value = G_VALUE_INIT;
-      g_value_init(&value, G_TYPE_STRING);
-      g_value_set_string(&value, "review-pages");
-      auto* provider = gdk_content_provider_new_for_value(&value);
-      g_value_unset(&value);
-      return provider;
-    }), this);
-    gtk_widget_add_controller(GTK_WIDGET(row), GTK_EVENT_CONTROLLER(drag));
+    auto* row = GTK_FLOW_BOX_CHILD(gtk_flow_box_child_new());
+    gtk_flow_box_child_set_child(row, GTK_WIDGET(box));
+    if (thumbnail)
+      g_object_set_data(G_OBJECT(row), "review-thumbnail", thumbnail);
 
     auto* drop = gtk_drop_target_new(G_TYPE_STRING,
         static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE));
     g_signal_connect(drop, "drop", G_CALLBACK(+[](
         GtkDropTarget* target, const GValue*, double, double, gpointer data) -> gboolean {
       auto* w = self(data);
-      auto* row = GTK_LIST_BOX_ROW(gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(target)));
+      auto* row = GTK_FLOW_BOX_CHILD(
+          gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(target)));
       if (!w->document_ || dragged_pages.empty()) return FALSE;
-      const auto destination = row_index(row);
+      const auto destination = child_index(row);
+      loading_log("sidebar drop destination=%zu pages=%zu", destination,
+                  dragged_indices.size());
       if (dragged_source == w)
         w->document_->reorder(dragged_indices, destination);
       else
@@ -1540,10 +1609,11 @@ void Window::rebuild_sidebar() {
     }), this);
     gtk_widget_add_controller(GTK_WIDGET(row), GTK_EVENT_CONTROLLER(drop));
 
-    gtk_list_box_append(sidebar_, GTK_WIDGET(row));
-    if (i == current_page_) gtk_list_box_select_row(sidebar_, row);
+    gtk_flow_box_append(sidebar_, GTK_WIDGET(row));
+    if (i == current_page_) gtk_flow_box_select_child(sidebar_, row);
   }
   syncing_sidebar_ = false;
+  queue_sidebar_thumbnail_sizes();
 }
 
 double Window::page_top(std::size_t page) const {
@@ -1572,7 +1642,7 @@ void Window::update_page_status() {
     return;
   }
   const std::string zoom = std::to_string(static_cast<int>(zoom_ * 100)) + "%";
-  GList* rows = sidebar_ ? gtk_list_box_get_selected_rows(sidebar_) : nullptr;
+  GList* rows = sidebar_ ? gtk_flow_box_get_selected_children(sidebar_) : nullptr;
   const int selected = g_list_length(rows);
   g_list_free(rows);
   const std::string status = selected > 1 ?
@@ -1639,16 +1709,100 @@ void Window::render_current() {
 
 void Window::sync_sidebar_selection(std::size_t page) {
   if (!sidebar_) return;
-  GList* rows = gtk_list_box_get_selected_rows(sidebar_);
+  GList* rows = gtk_flow_box_get_selected_children(sidebar_);
   const bool multi = rows && rows->next;
   g_list_free(rows);
   if (multi) return;
   sidebar_anchor_ = page;
   syncing_sidebar_ = true;
-  gtk_list_box_unselect_all(sidebar_);
-  if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))
-    gtk_list_box_select_row(sidebar_, row);
+  gtk_flow_box_unselect_all(sidebar_);
+  if (auto* row = gtk_flow_box_get_child_at_index(sidebar_, static_cast<int>(page)))
+    gtk_flow_box_select_child(sidebar_, row);
   syncing_sidebar_ = false;
+  scroll_sidebar_to_page(page);
+}
+
+void Window::scroll_sidebar_to_page(std::size_t page) {
+  if (!sidebar_) return;
+  auto* row = gtk_flow_box_get_child_at_index(sidebar_, static_cast<int>(page));
+  if (!row) return;
+  auto* scroller = GTK_SCROLLED_WINDOW(gtk_widget_get_ancestor(
+      GTK_WIDGET(sidebar_), GTK_TYPE_SCROLLED_WINDOW));
+  if (!scroller) return;
+  graphene_rect_t bounds;
+  if (!gtk_widget_compute_bounds(GTK_WIDGET(row), GTK_WIDGET(sidebar_), &bounds))
+    return;
+  auto* adjustment = gtk_scrolled_window_get_vadjustment(scroller);
+  const double lower = gtk_adjustment_get_lower(adjustment);
+  const double visible = gtk_adjustment_get_page_size(adjustment);
+  const double maximum =
+      std::max(lower, gtk_adjustment_get_upper(adjustment) - visible);
+  const double value = gtk_adjustment_get_value(adjustment);
+  double target = value;
+  if (bounds.origin.y < value)
+    target = bounds.origin.y;
+  else if (bounds.origin.y + bounds.size.height > value + visible)
+    target = bounds.origin.y + bounds.size.height - visible;
+  target = std::clamp(target, lower, maximum);
+  if (std::abs(target - value) > 0.5) gtk_adjustment_set_value(adjustment, target);
+}
+
+void Window::update_sidebar_thumbnail_sizes() {
+  sidebar_thumbnail_sizes_source_id_ = 0;
+  if (!sidebar_ || !document_) return;
+  int list_width = gtk_paned_get_position(split_);
+  if (list_width <= 0) list_width = std::max(160, sidebar_position_);
+  list_width = std::min(list_width, kSidebarMaxWidth);
+  const int spacing =
+      static_cast<int>(gtk_flow_box_get_column_spacing(sidebar_));
+  const int columns =
+      list_width >= 500 ? 3 :
+      list_width >= 300 ? 2 : 1;
+  gtk_flow_box_set_min_children_per_line(sidebar_, columns);
+  gtk_flow_box_set_max_children_per_line(sidebar_, columns);
+  // Each flow child carries 10px of padding on both sides.
+  const int content_width = std::max(40,
+      (list_width - spacing * (columns - 1)) / columns - 20);
+  for (std::size_t i = 0; i < document_->page_count(); ++i) {
+    auto* row = gtk_flow_box_get_child_at_index(sidebar_, static_cast<int>(i));
+    if (!row) continue;
+    auto* picture = GTK_WIDGET(
+        g_object_get_data(G_OBJECT(row), "review-thumbnail"));
+    if (!picture) continue;
+    const auto& page = document_->page(i);
+    const int content_height = std::max(1, static_cast<int>(std::lround(
+        content_width * page.height_points / page.width_points)));
+    // Only request a height: requesting the width would raise the flow box's
+    // minimum width, which feeds back into the paned position and makes the
+    // sidebar (and thumbnails) grow on every layout pass.
+    gtk_widget_set_size_request(picture, -1, content_height);
+  }
+  // Layout changes resize the rows, so re-anchor on the current page after
+  // the frame has been allocated.
+  if (sidebar_follow_source_id_) g_source_remove(sidebar_follow_source_id_);
+  sidebar_follow_source_id_ = g_timeout_add(50, Window::follow_sidebar_page, this);
+}
+
+void Window::queue_sidebar_thumbnail_sizes() {
+  // Throttle rather than debounce: resizing should reflow live, like a
+  // responsive web page, instead of waiting for the drag to stop.
+  if (!sidebar_thumbnail_sizes_source_id_)
+    sidebar_thumbnail_sizes_source_id_ =
+        g_timeout_add(16, Window::sidebar_thumbnail_sizes_timeout, this);
+}
+
+gboolean Window::sidebar_thumbnail_sizes_timeout(gpointer data) {
+  auto* w = static_cast<Window*>(data);
+  w->sidebar_thumbnail_sizes_source_id_ = 0;
+  w->update_sidebar_thumbnail_sizes();
+  return G_SOURCE_REMOVE;
+}
+
+gboolean Window::follow_sidebar_page(gpointer data) {
+  auto* w = static_cast<Window*>(data);
+  w->sidebar_follow_source_id_ = 0;
+  if (w->document_) w->scroll_sidebar_to_page(w->current_page_);
+  return G_SOURCE_REMOVE;
 }
 
 void Window::show_current_page(std::size_t page) {
@@ -2673,8 +2827,8 @@ void Window::finish_inline_text_edit(bool commit) {
 
 std::vector<std::size_t> Window::selected_pages() const {
   std::vector<std::size_t> pages;
-  for (GList* rows = gtk_list_box_get_selected_rows(sidebar_), *item = rows; item; item = item->next)
-    pages.push_back(row_index(GTK_LIST_BOX_ROW(item->data)));
+  for (GList* rows = gtk_flow_box_get_selected_children(sidebar_), *item = rows; item; item = item->next)
+    pages.push_back(child_index(GTK_FLOW_BOX_CHILD(item->data)));
   if (pages.empty() && document_) pages.push_back(current_page_);
   std::sort(pages.begin(), pages.end());
   return pages;

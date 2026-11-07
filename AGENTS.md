@@ -72,9 +72,21 @@ new model `.cpp` must be added to `tests/meson.build` as well as
   window handle scrolling normally.
 - The sidebar supports multi-page selection (`Ctrl`/`Shift`). `Shift`-click
   extends from the last plain/`Ctrl`-clicked anchor and is handled by a
-  capture-phase `GtkGestureClick`, because `GtkListBox` in
-  `GTK_SELECTION_MULTIPLE` only toggles the clicked row. `set_current_page`
-  must not clear a multi-row selection; batch actions consume `selected_pages()`.
+  capture-phase `GtkGestureClick`. `GtkFlowBox` in `GTK_SELECTION_MULTIPLE`
+  toggles the clicked child, so plain clicks are normalized back to one child
+  in `selected-children-changed`. `set_current_page` must not clear a
+  multi-row selection; batch actions consume `selected_pages()`.
+- Sidebar thumbnails are sized from the column width in
+  `update_sidebar_thumbnail_sizes()`, queued after `rebuild_sidebar()` and on
+  `GtkPaned` position changes. The flow box switches between 1 and up to 3
+  columns at width breakpoints (300/500 px), and the sidebar is capped at
+  700 px. Pictures request only a height; requesting their width would raise
+  the paned's minimum width and make the sidebar grow on every layout pass.
+  `scroll_sidebar_to_page()` keeps the current page visible while the document
+  scrolls, and a short follow-up timer re-anchors after a reflow.
+- Page reordering uses one `GtkDragSource` on the flow box (in the capture
+  phase) rather than one per child, so `GtkFlowBox`'s own rubberband drag
+  gesture does not preempt it. Drop targets stay on each child.
 - Dragging an annotation across a page boundary in continuous mode transfers it
   with `Document::move_annotation()`; keep the source/target page offsets in
   sync with `page_top` and the centered page x offset.
