@@ -191,7 +191,10 @@ gboolean Window::finish_scroll(gpointer data) {
   w->scroll_settle_source_id_ = 0;
   w->scrolling_ = false;
   loading_log("scroll end pending=%zu", w->pending_page_renders_.size());
-  if (w->document_ && w->canvas_scroll_) {
+  // page_top() describes the continuous layout only. In single-page mode the
+  // current page is centered in a viewport-sized canvas, so pruning by those
+  // offsets would discard the very page that is on screen.
+  if (w->continuous_scroll_ && w->document_ && w->canvas_scroll_) {
     auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
     const double view_top = gtk_adjustment_get_value(adjustment);
     const double view_bottom = view_top + gtk_adjustment_get_page_size(adjustment);
@@ -246,8 +249,12 @@ gboolean Window::render_pending_pages(gpointer data) {
   const auto skip = best->second;
   w->pending_page_renders_.erase(best);
 
+  // Only the continuous layout has meaningful canvas offsets. In single-page
+  // mode the queued page is the on-screen page (or its preload), so render it
+  // unconditionally.
   bool near_viewport = true;
-  if (w->canvas_scroll_ && w->document_ && page < w->document_->page_count()) {
+  if (w->continuous_scroll_ && w->canvas_scroll_ && w->document_ &&
+      page < w->document_->page_count()) {
     auto* adjustment = gtk_scrolled_window_get_vadjustment(w->canvas_scroll_);
     const double view_top = gtk_adjustment_get_value(adjustment);
     const double view_bottom = view_top + gtk_adjustment_get_page_size(adjustment);
