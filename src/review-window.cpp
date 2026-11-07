@@ -733,15 +733,46 @@ void Window::build_ui() {
   gtk_list_box_set_activate_on_single_click(sidebar_, TRUE);
   gtk_scrolled_window_set_child(sidebar_scroll, GTK_WIDGET(sidebar_));
   gtk_paned_set_start_child(split_, GTK_WIDGET(sidebar_scroll));
-  auto* modifier_tracker = gtk_event_controller_legacy_new();
-  g_signal_connect(modifier_tracker, "event", G_CALLBACK(+[](
-      GtkEventControllerLegacy*, GdkEvent* event, gpointer data) -> gboolean {
+  auto* selection_click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(selection_click),
+                                GDK_BUTTON_PRIMARY);
+  gtk_event_controller_set_propagation_phase(
+      GTK_EVENT_CONTROLLER(selection_click), GTK_PHASE_CAPTURE);
+  g_signal_connect(selection_click, "pressed", G_CALLBACK(+[](
+      GtkGestureClick* gesture, int, double, double y, gpointer data) {
     auto* w = self(data);
-    if (gdk_event_get_event_type(event) == GDK_BUTTON_PRESS)
-      w->sidebar_modifiers_ = gdk_event_get_modifier_state(event);
-    return GDK_EVENT_PROPAGATE;
+    w->sidebar_modifiers_ =
+        gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
+    if (!(w->sidebar_modifiers_ & GDK_SHIFT_MASK) || !w->document_ ||
+        w->document_->page_count() == 0) {
+      // Let GtkListBox handle plain and ctrl clicks itself.
+      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+      return;
+    }
+    auto* row = gtk_list_box_get_row_at_y(w->sidebar_, static_cast<int>(y));
+    if (!row) {
+      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+      return;
+    }
+    // Claim the press so GtkListBox does not toggle just the clicked row.
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    const auto page = row_index(row);
+    const auto anchor =
+        std::min(w->sidebar_anchor_, w->document_->page_count() - 1);
+    const auto first = std::min(anchor, page);
+    const auto last = std::max(anchor, page);
+    w->syncing_sidebar_ = true;
+    gtk_list_box_unselect_all(w->sidebar_);
+    for (auto i = first; i <= last; ++i)
+      if (auto* item = gtk_list_box_get_row_at_index(
+              w->sidebar_, static_cast<int>(i)))
+        gtk_list_box_select_row(w->sidebar_, item);
+    w->syncing_sidebar_ = false;
+    w->select_page(page);
+    w->update_page_status();
   }), this);
-  gtk_widget_add_controller(GTK_WIDGET(sidebar_), modifier_tracker);
+  gtk_widget_add_controller(GTK_WIDGET(sidebar_),
+                            GTK_EVENT_CONTROLLER(selection_click));
   g_signal_connect_swapped(sidebar_, "row-activated", G_CALLBACK(+[](
       Window* w, GtkListBoxRow* row) {
     if (!row) return;
@@ -754,23 +785,27 @@ void Window::build_ui() {
       GtkListBox*, GtkListBoxRow* row, gpointer data) {
     auto* w = self(data);
     if (w->syncing_sidebar_ || !row || !w->document_) return;
-    const bool modifier =
-        (w->sidebar_modifiers_ & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) != 0;
-    if (!modifier) {
-      GList* selected = gtk_list_box_get_selected_rows(w->sidebar_);
-      if (selected && selected->next) {
-        w->syncing_sidebar_ = true;
-        gtk_list_box_unselect_all(w->sidebar_);
-        gtk_list_box_select_row(w->sidebar_, row);
-        w->syncing_sidebar_ = false;
-      }
-      g_list_free(selected);
+    const auto page = row_index(row);
+    const bool control = (w->sidebar_modifiers_ & GDK_CONTROL_MASK) != 0;
+    if (control) {
+      // Keep GTK's toggle behavior; the clicked row becomes the new anchor.
+      w->sidebar_anchor_ = page;
+      w->update_page_status();
+      return;
     }
+    w->sidebar_anchor_ = page;
+    GList* selected = gtk_list_box_get_selected_rows(w->sidebar_);
+    if (selected && selected->next) {
+      w->syncing_sidebar_ = true;
+      gtk_list_box_unselect_all(w->sidebar_);
+      gtk_list_box_select_row(w->sidebar_, row);
+      w->syncing_sidebar_ = false;
+    }
+    g_list_free(selected);
     GList* rows = gtk_list_box_get_selected_rows(w->sidebar_);
     const bool single = rows && !rows->next;
-    const auto page = row_index(row);
     g_list_free(rows);
-    if (single && !modifier) w->select_page(page);
+    if (single) w->select_page(page);
     w->update_page_status();
   }), this);
   auto* file_drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
@@ -1426,6 +1461,7 @@ void Window::refresh() {
   rebuild_sidebar();
   if (document_ && current_page_ >= document_->page_count())
     current_page_ = document_->page_count() - 1;
+  if (document_) sidebar_anchor_ = current_page_;
   render_current();
   update_title();
 }
@@ -1607,6 +1643,7 @@ void Window::sync_sidebar_selection(std::size_t page) {
   const bool multi = rows && rows->next;
   g_list_free(rows);
   if (multi) return;
+  sidebar_anchor_ = page;
   syncing_sidebar_ = true;
   gtk_list_box_unselect_all(sidebar_);
   if (auto* row = gtk_list_box_get_row_at_index(sidebar_, static_cast<int>(page)))

@@ -161,6 +161,7 @@ private:
   bool continuous_scroll_{false};
   bool syncing_sidebar_{false};
   GdkModifierType sidebar_modifiers_{};
+  std::size_t sidebar_anchor_{};
   int sidebar_position_{180};
   double last_scroll_value_{};
   bool has_last_scroll_value_{};

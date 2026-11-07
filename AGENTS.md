@@ -70,7 +70,10 @@ new model `.cpp` must be added to `tests/meson.build` as well as
 - Single-page mode uses the edge-scroll velocity thresholds for page turns.
   Continuous mode must return before that page-turn logic and let the scrolled
   window handle scrolling normally.
-- The sidebar supports multi-page selection (`Ctrl`/`Shift`). `set_current_page`
+- The sidebar supports multi-page selection (`Ctrl`/`Shift`). `Shift`-click
+  extends from the last plain/`Ctrl`-clicked anchor and is handled by a
+  capture-phase `GtkGestureClick`, because `GtkListBox` in
+  `GTK_SELECTION_MULTIPLE` only toggles the clicked row. `set_current_page`
   must not clear a multi-row selection; batch actions consume `selected_pages()`.
 - Dragging an annotation across a page boundary in continuous mode transfers it
   with `Document::move_annotation()`; keep the source/target page offsets in
